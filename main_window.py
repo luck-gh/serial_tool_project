@@ -520,6 +520,16 @@ class SerialTool(QMainWindow):
         self.module_combo.addItem("全部")
         continuous_layout.addWidget(self.module_combo)
 
+        # 新增的跳转到此按钮
+        self.jump_to_module_btn = QPushButton("跳转到此")
+        self.jump_to_module_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BLUE_BUTTON};
+                color: white;
+            }}
+        """)
+        continuous_layout.addWidget(self.jump_to_module_btn)
+
         self.continuous_btn = QPushButton("连续发送")
         self.continuous_btn.setStyleSheet(f"""
             QPushButton {{
@@ -566,6 +576,7 @@ class SerialTool(QMainWindow):
         self.export_btn.clicked.connect(self.export_template)
         self.refresh_modules_btn.clicked.connect(self.refresh_modules)
         self.config_btn.clicked.connect(self.open_config_dialog)
+        self.jump_to_module_btn.clicked.connect(self._jump_to_module_row)
 
     def refresh_ports(self):
         """刷新可用串口列表"""
@@ -927,11 +938,14 @@ class SerialTool(QMainWindow):
 
     def import_template(self):
         """导入模板"""
+        last_dir = self.config_manager.get_last_used_directory()
         filename, _ = QFileDialog.getOpenFileName(
-            self, "导入模板", "", "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
+            self, "导入模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
 
         if not filename:
             return
+        
+        self.config_manager.set_last_used_directory(os.path.dirname(filename))
 
         try:
             with open(filename, 'r', encoding='utf-8') as f:
@@ -985,11 +999,14 @@ class SerialTool(QMainWindow):
 
     def export_template(self):
         """导出模板"""
+        last_dir = self.config_manager.get_last_used_directory()
         filename, _ = QFileDialog.getSaveFileName(
-            self, "导出模板", "", "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
+            self, "导出模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
 
         if not filename:
             return
+        
+        self.config_manager.set_last_used_directory(os.path.dirname(filename))
 
         try:
             with open(filename, 'w', encoding='utf-8', newline='') as f:
@@ -1005,6 +1022,30 @@ class SerialTool(QMainWindow):
 
         except Exception as e:
             self.output_manager.append_text(f"错误: 导出模板失败: {str(e)}", OutputSource.ERROR)
+
+    def _jump_to_module_row(self):
+        """跳转到所选模块的第一个命令行"""
+        selected_module_name = self.module_combo.currentText()
+
+        if selected_module_name == "全部":
+            self.output_manager.append_text("提示: 请选择一个具体的模块进行跳转。", OutputSource.ERROR)
+            return
+
+        # 获取所选模块的行号列表
+        module_rows = self.modules.get(selected_module_name)
+        if not module_rows:
+            self.output_manager.append_text(f"模块 '{selected_module_name}' 中没有找到命令。", OutputSource.ERROR)
+            return
+
+        # 获取模块的第一个命令的行号
+        first_command_row = module_rows[0]
+
+        # 滚动到该行
+        self.command_table.scrollToItem(self.command_table.item(first_command_row, 0))
+        
+        # 选中该行
+        self.command_table.selectRow(first_command_row)
+        self.output_manager.append_text(f"已跳转到模块 '{selected_module_name}' 的第一个命令。", OutputSource.SYSTEM)
 
     def closeEvent(self, event):
         """对话框关闭事件"""

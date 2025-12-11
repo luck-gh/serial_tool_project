@@ -101,3 +101,12 @@ class ConfigManager:
             "path": path,
         }
         self.save_config()
+
+    def set_last_used_directory(self, path):
+        """设置最后使用的目录"""
+        self.config["last_used_directory"] = path
+        self.save_config()
+
+    def get_last_used_directory(self):
+        """获取最后使用的目录, 如果没有则返回当前工作目录"""
+        return self.config.get("last_used_directory", os.getcwd())

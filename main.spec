@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# pyinstaller main.spec
 import os
 
 # 获取当前工作目录

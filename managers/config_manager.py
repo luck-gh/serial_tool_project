@@ -48,7 +48,7 @@ class ConfigManager:
             "tools": {
                 "number_conversion_dialog": {
                     "path": "",
-                    "enabled": True
+                    "enabled": False
                 }
             }
         }

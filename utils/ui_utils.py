@@ -1,7 +1,21 @@
 import os
 import sys
+from enum import Enum
 from PyQt5.QtWidgets import QMenu
 from PyQt5.QtGui import QColor
+
+class OutputSource(Enum):
+    """输出来源类型"""
+    SEND = "send"      # 发送数据
+    RECEIVE = "receive" # 接收数据
+    SYSTEM = "system"  # 系统信息
+    ERROR = "error"    # 错误信息
+
+
+class SpecialCommandType(Enum):
+    """特殊指令类型"""
+    MODE = "mode"
+    DELAY = "delay"
 
 def resource_path(relative_path):
     """
@@ -26,8 +40,9 @@ def resource_path(relative_path):
         return path1
 
     except Exception:
-        # 在开发环境中
-        base_path = os.path.abspath(".")
+        # 在开发环境中, 使用当前文件所在目录的父目录作为根目录
+        # ui_utils.py 在 utils/ 目录下, 所以其父目录是项目根目录
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(base_path, relative_path)
 
 class Colors:

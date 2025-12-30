@@ -15,16 +15,17 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette
 
-from utils.ui_utils import UIUtils, Colors, resource_path
-from widgets.custom_widgets import CustomTextBrowser, OutputSource
+from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource
+from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox
 from widgets.command_widgets import CommandTableWidget
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
 from core.serial_thread import SerialThread
 from managers.config_manager import ConfigManager
 from dialogs.config_dialog import ConfigDialog
+from widgets.base_widgets import BaseWidgetMixin
 
-class SerialTool(QMainWindow):
+class SerialTool(QMainWindow, BaseWidgetMixin):
     """串口调试工具主窗口"""
     def __init__(self, tool_version="0.0.0", tool_version_date="N/A", exe_name="main"):
         super().__init__()
@@ -52,9 +53,7 @@ class SerialTool(QMainWindow):
 
         self.init_ui()
         self.refresh_ports()
-
-        # 添加10条初始命令
-        self.add_initial_commands(10)
+        self.load_state()
 
     def add_initial_commands(self, addlen):
         """添加10条空的初始命令"""
@@ -229,6 +228,18 @@ class SerialTool(QMainWindow):
         # 连接信号
         self.connect_signals()
 
+        # 更新工具状态
+        self.update_tools_state()
+
+    def update_tools_state(self):
+        """根据配置更新工具按钮状态"""
+        is_enabled = self.config_manager.is_tool_enabled("number_conversion_dialog")
+        self.calc_btn.setEnabled(is_enabled)
+        if is_enabled:
+            self.calc_btn.setStyleSheet(f"QPushButton {{ background-color: {Colors.BLUE_BUTTON}; color: white; }}")
+        else:
+            self.calc_btn.setStyleSheet("QPushButton {{ background-color: #cccccc; color: #888888; }}")
+
     def create_left_panel(self):
         """创建左侧设置面板 (可滚动) """
         # 滚动区域
@@ -392,6 +403,19 @@ class SerialTool(QMainWindow):
         interval_layout.addWidget(self.interval_spin)
         send_layout.addLayout(interval_layout)
 
+        # 循环发送设置
+        loop_layout = QHBoxLayout()
+        self.loop_send_check = QCheckBox("循环发送")
+        self.loop_send_check.setChecked(False)
+        loop_layout.addWidget(self.loop_send_check)
+        
+        loop_layout.addWidget(QLabel("间隔(ms):"))
+        self.loop_interval_spin = QSpinBox()
+        self.loop_interval_spin.setRange(10, 60000)
+        self.loop_interval_spin.setValue(1000)
+        loop_layout.addWidget(self.loop_interval_spin)
+        send_layout.addLayout(loop_layout)
+
         layout.addWidget(send_group)
 
         # 其他设置
@@ -435,6 +459,12 @@ class SerialTool(QMainWindow):
 
         # 添加弹性空间
         layout.addStretch()
+
+        # 工具相关
+        self.tools_group = CollapsibleGroupBox("工具相关")
+        self.calc_btn = QPushButton("位计算器")
+        self.tools_group.addWidget(self.calc_btn)
+        layout.addWidget(self.tools_group)
 
         # 配置按钮
         self.config_btn = QPushButton("配置")
@@ -577,6 +607,7 @@ class SerialTool(QMainWindow):
         self.refresh_modules_btn.clicked.connect(self.refresh_modules)
         self.config_btn.clicked.connect(self.open_config_dialog)
         self.jump_to_module_btn.clicked.connect(self._jump_to_module_row)
+        self.calc_btn.clicked.connect(self.open_bit_calculator)
 
     def refresh_ports(self):
         """刷新可用串口列表"""
@@ -637,6 +668,10 @@ class SerialTool(QMainWindow):
 
     def close_serial(self):
         """关闭串口"""
+        # 如果正在连续发送，停止它
+        if self.is_continuous_sending:
+            self.stop_continuous_sending()
+
         if self.serial_thread:
             self.serial_thread.stop()
             self.serial_thread = None
@@ -664,6 +699,15 @@ class SerialTool(QMainWindow):
     def on_serial_error(self, error_msg):
         """串口错误回调"""
         self.output_manager.append_text(f"错误: {error_msg}", OutputSource.ERROR)
+        
+        # 串口错误时停止连续发送
+        if self.is_continuous_sending:
+            self.stop_continuous_sending()
+            
+        # 串口错误时停止循环发送定时器 (如果有)
+        if hasattr(self, 'continuous_timer'):
+            self.continuous_timer.stop()
+            
         if self.is_connected:
             self.close_serial()
 
@@ -673,6 +717,7 @@ class SerialTool(QMainWindow):
         if dialog.exec_():
             # 配置已保存，可以执行一些刷新操作
             self.output_manager.append_text("配置已更新", OutputSource.SYSTEM)
+            self.update_tools_state()
 
 
     def get_send_color(self):
@@ -696,9 +741,11 @@ class SerialTool(QMainWindow):
 
     def send_command(self, command, row_index=None):
         """发送命令"""
-        if not self.is_connected:
+        if not self.is_connected or not self.serial_thread:
             self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
-            return
+            if self.is_continuous_sending:
+                self.stop_continuous_sending()
+            return False
 
         try:
             # 添加结尾标识符
@@ -707,18 +754,29 @@ class SerialTool(QMainWindow):
 
             # 发送数据
             sent_bytes = self.serial_thread.write_data(full_command)
-            self.send_count += sent_bytes
-            self.update_statistics()
+            if sent_bytes > 0:
+                self.send_count += sent_bytes
+                self.update_statistics()
 
-            # 重置接收时间戳标志
-            self.output_manager.reset_receive_timestamp()
+                # 重置接收时间戳标志
+                self.output_manager.reset_receive_timestamp()
 
-            # 显示发送的字符串
-            if self.show_send_check.isChecked():
-                self.output_manager.append_text(command, OutputSource.SEND)
+                # 显示发送的字符串
+                if self.show_send_check.isChecked():
+                    self.output_manager.append_text(command, OutputSource.SEND)
+                
+                return True
+            else:
+                # 发送失败 (可能是串口已意外关闭)
+                if self.is_continuous_sending:
+                    self.stop_continuous_sending()
+                return False
 
         except Exception as e:
             self.output_manager.append_text(f"错误: 发送失败: {str(e)}", OutputSource.ERROR)
+            if self.is_continuous_sending:
+                self.stop_continuous_sending()
+            return False
 
     def add_command(self):
         """添加新命令"""
@@ -820,7 +878,12 @@ class SerialTool(QMainWindow):
         # 发送命令
         def send_next_command(index=0):
             if not self.is_continuous_sending or index >= len(commands_to_send):
-                self.stop_continuous_sending()
+                # 检查是否开启了循环发送
+                if self.is_continuous_sending and self.loop_send_check.isChecked() and commands_to_send:
+                    # 等待循环间隔后再次开始
+                    QTimer.singleShot(self.loop_interval_spin.value(), self.send_continuous_commands)
+                else:
+                    self.stop_continuous_sending()
                 return
 
             row, command, is_special, *special_args = commands_to_send[index]
@@ -840,8 +903,11 @@ class SerialTool(QMainWindow):
                 QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
             else:
                 # 发送普通命令
-                self.send_command(command, row)
-                QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                if self.send_command(command, row):
+                    QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                else:
+                    # 发送失败时停止连续发送
+                    self.stop_continuous_sending()
 
         # 开始发送
         if commands_to_send:
@@ -1047,6 +1113,138 @@ class SerialTool(QMainWindow):
         self.command_table.selectRow(first_command_row)
         self.output_manager.append_text(f"已跳转到模块 '{selected_module_name}' 的第一个命令。", OutputSource.SYSTEM)
 
+    def save_state(self):
+        """保存当前状态到配置文件"""
+        try:
+            state = {
+                "commands": self.command_table.get_all_commands(),
+                "send_settings": {
+                    "loop_send": self.loop_send_check.isChecked(),
+                    "loop_interval": self.loop_interval_spin.value(),
+                    "continuous_interval": self.interval_spin.value(),
+                    "show_send": self.show_send_check.isChecked(),
+                    "send_color": self.send_color_combo.currentText(),
+                    "ending": self.ending_combo.currentText(),
+                    "selected_module": self.module_combo.currentText()
+                },
+                "serial_settings": {
+                    "port": self.port_combo.currentText(),
+                    "baudrate": self.baud_combo.currentText(),
+                    "databits": self.data_bits_combo.currentText(),
+                    "parity": self.parity_combo.currentText(),
+                    "stopbits": self.stop_bits_combo.currentText()
+                },
+                "other_settings": {
+                    "show_timestamp": self.timestamp_check.isChecked()
+                },
+                "ui_state": {
+                    "h_splitter_sizes": self.h_splitter.sizes(),
+                    "tools_group_expanded": self.tools_group.isExpanded()
+                }
+            }
+            self.config_manager.set("last_state", state)
+        except Exception as e:
+            print(f"保存状态失败: {e}")
+
+    def load_state(self):
+        """从配置文件加载状态"""
+        try:
+            state = self.config_manager.get("last_state")
+            if not state:
+                # 兼容旧版本配置 (如果存在)
+                self._load_legacy_state()
+                return
+
+            # 加载发送设置
+            send_settings = state.get("send_settings", {})
+            self.loop_send_check.setChecked(send_settings.get("loop_send", False))
+            self.loop_interval_spin.setValue(send_settings.get("loop_interval", 1000))
+            self.interval_spin.setValue(send_settings.get("continuous_interval", 100))
+            self.show_send_check.setChecked(send_settings.get("show_send", False))
+            self.send_color_combo.setCurrentText(send_settings.get("send_color", "红色"))
+            self.ending_combo.setCurrentText(send_settings.get("ending", r"\r\n"))
+            
+            # 加载基本设置
+            serial_settings = state.get("serial_settings", {})
+            port = serial_settings.get("port")
+            if port and self.port_combo.findText(port) >= 0:
+                self.port_combo.setCurrentText(port)
+            self.baud_combo.setCurrentText(serial_settings.get("baudrate", "115200"))
+            self.data_bits_combo.setCurrentText(serial_settings.get("databits", "8"))
+            self.parity_combo.setCurrentText(serial_settings.get("parity", "None"))
+            self.stop_bits_combo.setCurrentText(serial_settings.get("stopbits", "1"))
+            
+            # 加载其他设置
+            other_settings = state.get("other_settings", {})
+            self.timestamp_check.setChecked(other_settings.get("show_timestamp", False))
+
+            # 加载分割器状态
+            ui_state = state.get("ui_state", {})
+            h_sizes = ui_state.get("h_splitter_sizes")
+            if h_sizes:
+                self.h_splitter.setSizes(h_sizes)
+            
+            # 加载折叠状态
+            self.tools_group.setExpanded(ui_state.get("tools_group_expanded", False))
+
+            # 加载命令
+            saved_commands = state.get("commands")
+            if saved_commands:
+                self.command_table.clear_all()
+                for row, cmd_data in enumerate(saved_commands):
+                    self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
+                self.refresh_modules()
+                
+                # 恢复选择的模块
+                selected_module = send_settings.get("selected_module")
+                if selected_module and self.module_combo.findText(selected_module) >= 0:
+                    self.module_combo.setCurrentText(selected_module)
+            else:
+                self.add_initial_commands(10)
+        except Exception as e:
+            print(f"加载状态失败: {e}")
+            if self.command_table.rowCount() == 0:
+                self.add_initial_commands(10)
+
+    def _load_legacy_state(self):
+        """加载旧版本的平铺式配置 (用于平滑迁移) """
+        try:
+            self.loop_send_check.setChecked(self.config_manager.get("loop_send", False))
+            self.loop_interval_spin.setValue(self.config_manager.get("loop_interval", 1000))
+            self.interval_spin.setValue(self.config_manager.get("continuous_interval", 100))
+            self.show_send_check.setChecked(self.config_manager.get("show_send", False))
+            self.send_color_combo.setCurrentText(self.config_manager.get("send_color", "红色"))
+            self.ending_combo.setCurrentText(self.config_manager.get("ending", r"\r\n"))
+            
+            port = self.config_manager.get("port")
+            if port and self.port_combo.findText(port) >= 0:
+                self.port_combo.setCurrentText(port)
+            self.baud_combo.setCurrentText(self.config_manager.get("baudrate", "115200"))
+            self.data_bits_combo.setCurrentText(self.config_manager.get("databits", "8"))
+            self.parity_combo.setCurrentText(self.config_manager.get("parity", "None"))
+            self.stop_bits_combo.setCurrentText(self.config_manager.get("stopbits", "1"))
+            
+            self.timestamp_check.setChecked(self.config_manager.get("show_timestamp", False))
+
+            h_sizes = self.config_manager.get("h_splitter_sizes")
+            if h_sizes:
+                self.h_splitter.setSizes(h_sizes)
+
+            saved_commands = self.config_manager.get("saved_commands")
+            if saved_commands:
+                self.command_table.clear_all()
+                for row, cmd_data in enumerate(saved_commands):
+                    self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
+                self.refresh_modules()
+                selected_module = self.config_manager.get("selected_module")
+                if selected_module and self.module_combo.findText(selected_module) >= 0:
+                    self.module_combo.setCurrentText(selected_module)
+            else:
+                self.add_initial_commands(10)
+        except:
+            self.add_initial_commands(10)
+
     def closeEvent(self, event):
         """对话框关闭事件"""
+        self.save_state()
         event.accept()

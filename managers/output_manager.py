@@ -1,6 +1,7 @@
 from datetime import datetime
 from PyQt5.QtGui import QColor, QTextCharFormat, QTextCursor
-from widgets.custom_widgets import OutputSource, CustomTextBrowser
+from utils.ui_utils import OutputSource
+from widgets.custom_widgets import CustomTextBrowser
 
 class OutputManager:
     """统一输出管理器"""

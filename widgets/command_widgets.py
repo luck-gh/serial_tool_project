@@ -8,11 +8,12 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLineEdit, QTableWidget, QCh
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics
 
-from utils.ui_utils import UIUtils, Colors
+from utils.ui_utils import UIUtils, Colors, resource_path
+from widgets.base_widgets import BaseWidgetMixin
 from dialogs.comment_edit_dialog import CommentEditDialog
 from managers.config_manager import ConfigManager
 
-class CommandLineEdit(QLineEdit):
+class CommandLineEdit(QLineEdit, BaseWidgetMixin):
     """自定义命令行编辑框, 支持注释显示和文本编辑右键菜单"""
     def __init__(self, config_manager: ConfigManager, parent=None):
         super().__init__(parent)
@@ -102,55 +103,13 @@ class CommandLineEdit(QLineEdit):
         menu.addAction(select_all_action)
 
         # --- 外部工具：数字转换器 ---
-        tool_name = "number_conversion_dialog"
-        is_enabled = self.config_manager.is_tool_enabled(tool_name)
-        tool_path = self.config_manager.get_tool_path(tool_name)
-        is_available = is_enabled and tool_path and os.path.exists(tool_path)
-
-        if is_available:
-            menu.addSeparator()
-            if self.hasSelectedText():
-                selected_text = self.selectedText().strip()
-                # 有选中文本时, 显示HEX和DEC计算
-                hex_action = QAction("HEX 计算", self)
-                hex_action.triggered.connect(lambda: self.open_number_converter(selected_text, "HEX"))
-                menu.addAction(hex_action)
-
-                dec_action = QAction("DEC 计算", self)
-                dec_action.triggered.connect(lambda: self.open_number_converter(selected_text, "DEC"))
-                menu.addAction(dec_action)
-            else:
-                # 没有选中文本时, 只显示一个通用的计算选项
-                calc_action = QAction("进制转换器", self)
-                calc_action.triggered.connect(lambda: self.open_number_converter())
-                menu.addAction(calc_action)
+        selected_text = self.selectedText().strip() if self.hasSelectedText() else None
+        self.add_number_converter_actions(menu, self.config_manager, selected_text)
 
         menu.exec_(self.mapToGlobal(position))
 
-    def open_number_converter(self, text="", conversion_type="HEX"):
-        """使用subprocess启动独立的数字转换器进程"""
-        tool_path = self.config_manager.get_tool_path("number_conversion_dialog")
-        if not tool_path:
-            QMessageBox.warning(self, "错误", "未找到数字转换器工具。")
-            return
 
-        command = []
-        if tool_path.endswith('.py'):
-            command.append(sys.executable)
-        
-        command.append(tool_path)
-
-        if text:
-            command.append(text)
-            command.append(conversion_type)
-
-        try:
-            subprocess.Popen(command, cwd=os.path.dirname(tool_path))
-        except Exception as e:
-            QMessageBox.critical(self, "启动失败", f"无法启动数字转换器:\n{str(e)}")
-
-
-class CommandTableWidget(QTableWidget):
+class CommandTableWidget(QTableWidget, BaseWidgetMixin):
     """命令表格控件"""
     def __init__(self, config_manager: ConfigManager, parent=None):
         super().__init__(parent)
@@ -205,6 +164,8 @@ class CommandTableWidget(QTableWidget):
         checkbox_layout = QHBoxLayout(checkbox_widget)
         enable_checkbox = QCheckBox()
         enable_checkbox.setChecked(enable)
+        # 连接勾选框状态改变信号，支持批量操作
+        enable_checkbox.stateChanged.connect(lambda state, r=row_index: self.on_checkbox_toggled(state, r))
         checkbox_layout.addWidget(enable_checkbox)
         checkbox_layout.setAlignment(Qt.AlignCenter)
         checkbox_layout.setContentsMargins(0, 0, 0, 0)
@@ -216,6 +177,8 @@ class CommandTableWidget(QTableWidget):
         command_edit.setText(command)
         command_edit.set_comment(comment)
         command_edit.textChanged.connect(lambda: self.on_command_changed(row_index))
+        # 回车发送功能
+        command_edit.returnPressed.connect(lambda: self.on_return_pressed(row_index))
 
         # 根据行号设置输入框背景色
         if row_index % 2 == 0:
@@ -280,6 +243,25 @@ class CommandTableWidget(QTableWidget):
         command_edit = self.cellWidget(row, 1)
         comment = self.comments.get(row, "")
         command_edit.set_comment(comment)
+
+    def on_checkbox_toggled(self, state, row):
+        """当勾选框状态改变时，如果该行在选中范围内，同步更新其他选中行"""
+        # 获取所有选中的行号
+        selected_rows = set(item.row() for item in self.selectionModel().selectedRows())
+        
+        # 如果当前行在选中行中，且选中了多行
+        if row in selected_rows and len(selected_rows) > 1:
+            is_checked = (state == Qt.Checked)
+            for r in selected_rows:
+                if r == row:
+                    continue
+                widget = self.cellWidget(r, 0)
+                if widget:
+                    cb = widget.findChild(QCheckBox)
+                    if cb:
+                        cb.blockSignals(True)
+                        cb.setChecked(is_checked)
+                        cb.blockSignals(False)
 
     def get_row_data(self, row):
         """获取行数据"""
@@ -392,15 +374,6 @@ class CommandTableWidget(QTableWidget):
                 except ValueError:
                     QMessageBox.warning(self, "错误", "请输入有效的数字")
 
-    def get_main_window(self):
-        """递归查找主窗口"""
-        parent = self.parent()
-        while parent is not None:
-            # 假设主窗口类名为 SerialTool
-            if parent.__class__.__name__ == 'SerialTool':
-                return parent
-            parent = parent.parent()
-        return None
 
     def insert_row_above(self, row):
         """在指定行上方插入新行"""
@@ -447,11 +420,38 @@ class CommandTableWidget(QTableWidget):
         # 更新发送按钮编号和连接
         self.update_send_buttons_after_row(row)
 
+    def on_return_pressed(self, row):
+        """编辑框回车事件"""
+        main_window = self.get_main_window()
+        if main_window:
+            main_window.on_send_clicked(row)
+
     def update_send_buttons_after_row(self, start_row):
         """从指定行开始更新所有发送按钮的编号和连接"""
         for row in range(start_row, self.rowCount()):
+            # 更新勾选框连接
+            checkbox_widget = self.cellWidget(row, 0)
+            if checkbox_widget:
+                cb = checkbox_widget.findChild(QCheckBox)
+                if cb:
+                    try:
+                        cb.stateChanged.disconnect()
+                    except:
+                        pass
+                    cb.stateChanged.connect(lambda state, r=row: self.on_checkbox_toggled(state, r))
+
+            # 更新发送按钮
             btn = self.cellWidget(row, 2)
             if btn:
                 btn.setText(f"{row + 1}")
                 # 重新连接按钮以确保使用正确的行号
                 self.connect_send_button(row, btn)
+            
+            # 更新编辑框的回车连接
+            edit = self.cellWidget(row, 1)
+            if edit:
+                try:
+                    edit.returnPressed.disconnect()
+                except:
+                    pass
+                edit.returnPressed.connect(lambda checked=False, r=row: self.on_return_pressed(r))

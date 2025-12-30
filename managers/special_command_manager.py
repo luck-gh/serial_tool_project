@@ -1,4 +1,4 @@
-from widgets.custom_widgets import SpecialCommandType
+from utils.ui_utils import SpecialCommandType
 from managers.config_manager import ConfigManager
 
 class SpecialCommandManager:

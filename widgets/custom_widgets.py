@@ -1,23 +1,11 @@
 import os
 import subprocess
 import sys
-from enum import Enum
-from PyQt5.QtWidgets import QTextEdit, QTextBrowser, QAction, QMessageBox
-from PyQt5.QtCore import Qt
-from utils.ui_utils import UIUtils
-
-class OutputSource(Enum):
-    """输出来源类型"""
-    SEND = "send"      # 发送数据
-    RECEIVE = "receive" # 接收数据
-    SYSTEM = "system"  # 系统信息
-    ERROR = "error"    # 错误信息
-
-
-class SpecialCommandType(Enum):
-    """特殊指令类型"""
-    MODE = "mode"
-    DELAY = "delay"
+from PyQt5.QtWidgets import (QTextEdit, QTextBrowser, QAction, QMessageBox, 
+                             QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFrame, QSizePolicy)
+from PyQt5.QtCore import Qt, pyqtSignal
+from utils.ui_utils import UIUtils, resource_path, OutputSource, SpecialCommandType
+from widgets.base_widgets import BaseWidgetMixin
 
 class ExpandingTextEdit(QTextEdit):
     """一个可以根据内容自动扩展高度的文本编辑框"""
@@ -91,18 +79,13 @@ class ExpandingTextEdit(QTextEdit):
 
 from managers.config_manager import ConfigManager
 
-class CustomTextBrowser(QTextBrowser):
+class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
     """自定义文本浏览器, 支持右键菜单和外部工具调用"""
     def __init__(self, config_manager: ConfigManager, parent=None):
         super().__init__(parent)
         self.config_manager = config_manager
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
-
-    @property
-    def converter_path(self):
-        """从配置中获取转换器路径"""
-        return self.config_manager.get_tool_path("number_conversion_dialog")
 
     def show_context_menu(self, position):
         """显示自定义右键菜单"""
@@ -119,51 +102,115 @@ class CustomTextBrowser(QTextBrowser):
         menu.addAction(select_all_action)
 
         # --- 外部工具：数字转换器 ---
-        tool_name = "number_conversion_dialog"
-        is_enabled = self.config_manager.is_tool_enabled(tool_name)
-        tool_path = self.config_manager.get_tool_path(tool_name)
-        is_available = is_enabled and tool_path and os.path.exists(tool_path)
-
-        if is_available:
-            menu.addSeparator()
-            if self.textCursor().hasSelection():
-                selected_text = self.textCursor().selectedText().strip()
-                # 有选中文本时, 显示HEX和DEC计算
-                hex_action = QAction("HEX 计算", self)
-                hex_action.triggered.connect(lambda: self.open_number_converter(selected_text, "HEX"))
-                menu.addAction(hex_action)
-
-                dec_action = QAction("DEC 计算", self)
-                dec_action.triggered.connect(lambda: self.open_number_converter(selected_text, "DEC"))
-                menu.addAction(dec_action)
-            else:
-                # 没有选中文本时, 只显示一个通用的计算选项
-                calc_action = QAction("进制转换器", self)
-                calc_action.triggered.connect(lambda: self.open_number_converter())
-                menu.addAction(calc_action)
+        selected_text = self.textCursor().selectedText().strip() if self.textCursor().hasSelection() else None
+        self.add_number_converter_actions(menu, self.config_manager, selected_text)
 
         menu.exec_(self.mapToGlobal(position))
 
-    def open_number_converter(self, text="", conversion_type="HEX"):
-        """使用subprocess启动独立的数字转换器进程"""
-        if not self.converter_path:
-            QMessageBox.warning(self, "错误", "未找到数字转换器工具。")
-            return
+class CollapsibleGroupBox(QWidget):
+    """一个可以折叠的容器控件，支持水平或垂直折叠"""
+    toggled = pyqtSignal(bool)
 
-        command = []
-        # 如果是Python脚本, 使用python解释器启动
-        if self.converter_path.endswith('.py'):
-            command.append(sys.executable) # 使用当前Python解释器
+    def __init__(self, title="", parent=None, horizontal=False):
+        super().__init__(parent)
+        self.horizontal = horizontal
+        self.title_text = title
         
-        command.append(self.converter_path)
+        if horizontal:
+            self.main_layout = QHBoxLayout(self)
+        else:
+            self.main_layout = QVBoxLayout(self)
+            
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
 
-        # 添加参数
-        if text:
-            command.append(text)
-            command.append(conversion_type)
+        self.toggle_button = QPushButton()
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+        
+        if horizontal:
+            self.toggle_button.setFixedWidth(25)
+            self.toggle_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        else:
+            self.toggle_button.setFixedHeight(35)
+            self.toggle_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        try:
-            # 使用 Popen 启动一个完全独立的进程, 不会阻塞UI
-            subprocess.Popen(command, cwd=os.path.dirname(self.converter_path))
-        except Exception as e:
-            QMessageBox.critical(self, "启动失败", f"无法启动数字转换器:\n{str(e)}")
+        self._update_button_text()
+        
+        self.toggle_button.setStyleSheet("""
+            QPushButton {
+                text-align: center;
+                font-weight: bold;
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                background-color: #ffffff;
+                color: #333333;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+            }
+        """)
+        
+        self.content_widget = QWidget()
+        self.content_widget.setObjectName("content_widget")
+        self.content_widget.setStyleSheet("""
+            #content_widget {
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                background-color: white;
+            }
+        """)
+        
+        if horizontal:
+            self.content_layout = QHBoxLayout(self.content_widget)
+            # 水平折叠时，内容在右侧，按钮在左侧
+            self.main_layout.addWidget(self.toggle_button)
+            self.main_layout.addWidget(self.content_widget)
+            self.content_widget.setVisible(False)
+        else:
+            self.content_layout = QVBoxLayout(self.content_widget)
+            # 垂直折叠时，内容在下方，按钮在上方
+            self.main_layout.addWidget(self.toggle_button)
+            self.main_layout.addWidget(self.content_widget)
+            self.content_widget.setVisible(False)
+            self.toggle_button.setStyleSheet(self.toggle_button.styleSheet() + """
+                QPushButton { text-align: left; padding-left: 8px; }
+                QPushButton:checked { border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }
+            """)
+            self.content_widget.setStyleSheet(self.content_widget.styleSheet() + """
+                #content_widget { border-top: none; border-top-left-radius: 0px; border-top-right-radius: 0px; }
+            """)
+
+        self.content_layout.setContentsMargins(12, 8, 12, 12)
+        self.content_layout.setSpacing(8)
+
+        self.toggle_button.toggled.connect(self._on_toggled)
+
+    def _update_button_text(self):
+        checked = self.toggle_button.isChecked()
+        if self.horizontal:
+            arrow = "◀" if checked else "▶"
+            # 水平按钮文字竖排
+            display_text = arrow + "\n" + "\n".join(list(self.title_text)) if self.title_text else arrow
+            self.toggle_button.setText(display_text)
+        else:
+            arrow = "▼" if checked else "▶"
+            self.toggle_button.setText(f"{arrow} {self.title_text}")
+
+    def _on_toggled(self, checked):
+        self.content_widget.setVisible(checked)
+        self._update_button_text()
+        self.toggled.emit(checked)
+
+    def isExpanded(self):
+        return self.toggle_button.isChecked()
+
+    def setExpanded(self, expanded):
+        self.toggle_button.setChecked(expanded)
+
+    def addWidget(self, widget):
+        self.content_layout.addWidget(widget)
+        
+    def addLayout(self, layout):
+        self.content_layout.addLayout(layout)

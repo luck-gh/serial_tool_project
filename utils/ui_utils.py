@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 from enum import Enum
 from PyQt5.QtWidgets import QMenu
 from PyQt5.QtGui import QColor
@@ -14,8 +15,12 @@ class OutputSource(Enum):
 
 class SpecialCommandType(Enum):
     """特殊指令类型"""
-    MODE = "mode"
-    DELAY = "delay"
+    MODE = "mode"           # 模块命名
+    DELAY = "delay"         # 延迟设置
+    SENDHEX = "sendhex"     # 十六进制发送
+    BAUDRATE = "baudrate"   # 波特率设置
+    SETENDLOG = "setendlog" # 结尾符设置
+    SENDMODE = "sendmode"   # 发送指定模块
 
 def resource_path(relative_path):
     """
@@ -58,6 +63,57 @@ class Colors:
 
 class UIUtils:
     """UI辅助工具类, 用于创建通用UI组件"""
+    @staticmethod
+    def parse_special_command(text):
+        """
+        解析特殊指令，支持冒号转义。
+        返回 (cmd_type_str, param) 如果是特殊指令格式，否则返回 (None, None)
+        """
+        if not text:
+            return None, None
+
+        unescaped_colon_pos = -1
+        for i in range(len(text)):
+            if text[i] == ':':
+                # 统计冒号前的反斜杠数量
+                backslash_count = 0
+                for j in range(i - 1, -1, -1):
+                    if text[j] == '\\':
+                        backslash_count += 1
+                    else:
+                        break
+                if backslash_count % 2 == 0:
+                    unescaped_colon_pos = i
+                    break
+        
+        if unescaped_colon_pos != -1:
+            prefix = text[:unescaped_colon_pos]
+            # 检查 prefix 是否只包含字母数字（符合 \w+）
+            if re.match(r'^\w+$', prefix):
+                param = text[unescaped_colon_pos + 1:]
+                return prefix.lower(), param
+        
+        return None, None
+
+    @staticmethod
+    def unescape_text(text):
+        """
+        处理转义字符: '/:' -> ':'
+        """
+        if not text:
+            return ""
+        result = ""
+        i = 0
+        while i < len(text):
+            if ((text[i] == '\\') or (text[i] == '/')) and ((i + 1) < len(text)):
+                if text[i+1] in [':']:
+                    result += text[i+1]
+                    i += 2
+                    continue
+            result += text[i]
+            i += 1
+        return result
+
     @staticmethod
     def create_styled_menu(parent):
         """创建一个带统一样式的QMenu"""

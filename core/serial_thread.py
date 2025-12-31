@@ -28,6 +28,10 @@ class SerialThread(QThread):
                 timeout=0.1
             )
             self.is_running = True
+            
+            # 打开串口后立即清空输入缓冲区，防止波特率切换产生的垃圾数据导致解码错误
+            if self.serial.is_open:
+                self.serial.reset_input_buffer()
 
             while self.is_running and self.serial and self.serial.is_open:
                 try:
@@ -40,7 +44,7 @@ class SerialThread(QThread):
                     break
 
         except Exception as e:
-            self.error_occurred.emit(f"串口打开失败: {str(e)}")
+            self.error_occurred.emit(f"串口被占用: {str(e)}")
 
     def write_data(self, data):
         """发送数据"""

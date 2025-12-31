@@ -34,7 +34,7 @@ class BaseWidgetMixin:
             menu.addSeparator()
             if selected_text:
                 # 有选中文本时, 显示HEX和DEC计算
-                hex_action = QAction("HEX 计算", self)
+                hex_action = QAction("HEX 计算\tCtrl+H", self)
                 hex_action.triggered.connect(lambda: self.open_bit_calculator(selected_text, "HEX"))
                 menu.addAction(hex_action)
 
@@ -159,3 +159,18 @@ class BaseWidgetMixin:
             QMessageBox.critical(main_window if main_window else self, "错误", f"打开位计算器失败: {str(e)}")
             if main_window and hasattr(main_window, 'output_manager'):
                 main_window.output_manager.append_text(f"错误: 打开位计算器失败: {str(e)}", OutputSource.ERROR)
+
+    def handle_common_shortcuts(self, event):
+        """处理通用的快捷键逻辑"""
+        # Ctrl+H: 唤醒 HEX 计算
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_H:
+            selected_text = ""
+            if hasattr(self, 'selectedText'): # QLineEdit
+                selected_text = self.selectedText().strip()
+            elif hasattr(self, 'textCursor'): # QTextEdit / QTextBrowser
+                selected_text = self.textCursor().selectedText().strip()
+            
+            if selected_text:
+                self.open_bit_calculator(selected_text, "HEX")
+                return True # 表示事件已处理
+        return False

@@ -15,8 +15,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette
 
-from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource
-from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox
+from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource, SpecialCommandType
+from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox, ClickableComboBox
 from widgets.command_widgets import CommandTableWidget
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
@@ -222,7 +222,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.receive_browser,
             lambda: self.timestamp_check.isChecked(),
             lambda: self.show_send_check.isChecked(),
-            self.get_send_color
+            self.get_send_color,
+            self.get_source_filter
         )
 
         # 连接信号
@@ -276,9 +277,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         # 端口选择
         port_layout = QHBoxLayout()
         port_layout.addWidget(QLabel("端口:"))
-        self.port_combo = QComboBox()
+        self.port_combo = ClickableComboBox()
         self.port_combo.setEditable(True)
-        self.port_combo.activated.connect(self.refresh_ports)
+        self.port_combo.popupAboutToBeShown.connect(self.refresh_ports)
         self.port_combo.installEventFilter(self)            # 禁用滚轮
         self.port_combo.setMinimumWidth(minimumWidth)       # 设置最小宽度
         port_layout.addWidget(self.refresh_ports_btn)
@@ -346,6 +347,29 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         receive_group = QGroupBox("接收设置")
         receive_layout = QVBoxLayout(receive_group)
         receive_layout.setSpacing(8)
+
+        # 输出来源类型勾选
+        source_type_layout = QHBoxLayout()
+        source_type_layout.addWidget(QLabel("输出来源:"))
+        receive_layout.addLayout(source_type_layout)
+
+        source_checkboxes_layout = QHBoxLayout()
+        self.show_send_source_check = QCheckBox("发送")
+        self.show_recv_source_check = QCheckBox("接收")
+        self.show_sys_source_check = QCheckBox("系统")
+        self.show_err_source_check = QCheckBox("错误")
+        
+        # 默认全部勾选
+        self.show_send_source_check.setChecked(True)
+        self.show_recv_source_check.setChecked(True)
+        self.show_sys_source_check.setChecked(True)
+        self.show_err_source_check.setChecked(True)
+
+        source_checkboxes_layout.addWidget(self.show_send_source_check)
+        source_checkboxes_layout.addWidget(self.show_recv_source_check)
+        source_checkboxes_layout.addWidget(self.show_sys_source_check)
+        source_checkboxes_layout.addWidget(self.show_err_source_check)
+        receive_layout.addLayout(source_checkboxes_layout)
 
         self.save_btn = QPushButton("保存数据")
         self.save_btn.setStyleSheet(f"""
@@ -528,8 +552,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         layout.addWidget(v_splitter, 4)
 
-        # 连续发送选择
-        continuous_group = QGroupBox("连续发送选择")
+        # 连续发送模块
+        continuous_group = QGroupBox("连续发送模块")
         continuous_layout = QHBoxLayout(continuous_group)
 
         self.refresh_modules_btn = QPushButton("刷新")
@@ -636,6 +660,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.output_manager.append_text("错误: 请选择串口", OutputSource.ERROR)
             return
 
+        # 检查串口是否存在
+        available_ports = [p.device for p in serial.tools.list_ports.comports()]
+        if port not in available_ports:
+            self.output_manager.append_text(f"错误: 串口 {port} 不存在", OutputSource.ERROR)
+            return
+
         try:
             baudrate = int(self.baud_combo.currentText())
             bytesize = int(self.data_bits_combo.currentText())
@@ -664,7 +694,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.output_manager.append_text("串口已打开", OutputSource.SYSTEM)
 
         except Exception as e:
-            self.output_manager.append_text(f"错误: 打开串口失败: {str(e)}", OutputSource.ERROR)
+            error_str = str(e)
+            if "PermissionError(13, '拒绝访问。'" in error_str or "Access is denied" in error_str:
+                self.output_manager.append_text(f"错误: 串口 {port} 正在使用中", OutputSource.ERROR)
+            else:
+                self.output_manager.append_text(f"错误: 打开串口失败: {error_str}", OutputSource.ERROR)
+            
+            # 打开失败时也刷新一下串口列表
+            self.refresh_ports()
 
     def close_serial(self):
         """关闭串口"""
@@ -710,6 +747,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             
         if self.is_connected:
             self.close_serial()
+        
+        # 串口错误时自动刷新串口列表
+        self.refresh_ports()
 
     def open_config_dialog(self):
         """打开配置对话框"""
@@ -730,6 +770,18 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             "黑色": "black"
         }
         return color_map.get(self.send_color_combo.currentText(), "red")
+
+    def get_source_filter(self, source_type):
+        """获取输出来源过滤状态"""
+        if source_type == OutputSource.SEND:
+            return self.show_send_source_check.isChecked()
+        elif source_type == OutputSource.RECEIVE:
+            return self.show_recv_source_check.isChecked()
+        elif source_type == OutputSource.SYSTEM:
+            return self.show_sys_source_check.isChecked()
+        elif source_type == OutputSource.ERROR:
+            return self.show_err_source_check.isChecked()
+        return True
 
     def get_ending_chars(self):
         """获取结尾标识符"""
@@ -783,31 +835,100 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         row = self.command_table.rowCount()
         # 直接添加行, add_command_row内部已经处理了按钮连接, 不需要再次连接
         self.command_table.add_command_row(False, "", "", row)
+        self.refresh_modules(silent=True)
 
     def on_send_clicked(self, row):
         """发送按钮点击事件"""
         enable, command, comment = self.command_table.get_row_data(row)
-        if command.strip():
+        if command is not None:  # 允许空字符串，只要行数据存在
             # 检查是否为特殊指令
-            if not enable and re.match(r'^(\w+):(.*)$', command, re.IGNORECASE):
-                match = re.match(r'^(\w+):(.*)$', command, re.IGNORECASE)
-                command_type = match.group(1).lower()
-                param = match.group(2)
+            cmd_type_str, param = UIUtils.parse_special_command(command)
+            if cmd_type_str:
+                # 尝试匹配枚举类型
+                command_type = None
+                for ct in SpecialCommandType:
+                    if ct.value == cmd_type_str:
+                        command_type = ct
+                        break
 
-                if command_type == "delay":
-                    try:
-                        delay_ms = float(param.strip())
-                        # 单次发送时执行delay
-                        self.output_manager.append_text(f"执行延迟: {delay_ms}ms", OutputSource.SYSTEM)
-                        # 使用QTimer进行非阻塞延迟
-                        QTimer.singleShot(int(delay_ms), lambda: None)
-                    except ValueError:
-                        self.output_manager.append_text(f"错误: 无效的延迟参数: {param}", OutputSource.ERROR)
-                else:
-                    self.output_manager.append_text(f"特殊指令 '{command_type}' 在单次发送中忽略", OutputSource.SYSTEM)
+                if command_type:
+                    # 执行特殊指令
+                    self.special_command_manager.execute(command_type, param, self)
+                    return  # 特殊指令执行后返回
+
+            # 普通命令或未知特殊指令, 处理转义后发送
+            unescaped_command = UIUtils.unescape_text(command)
+            self.send_command(unescaped_command, row)
+
+    def send_raw_data(self, data):
+        """发送原始字节数据 (供特殊指令使用) """
+        if not self.is_connected or not self.serial_thread:
+            self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
+            return False
+            
+        sent_bytes = self.serial_thread.write_data(data)
+        if sent_bytes > 0:
+            self.send_count += sent_bytes
+            self.update_statistics()
+            self.output_manager.reset_receive_timestamp()
+            if self.show_send_check.isChecked():
+                self.output_manager.append_text(f"[HEX]: {data.hex(' ').upper()}", OutputSource.SEND)
+            return True
+        return False
+
+    def update_baudrate(self, baudrate):
+        """更新波特率 (供特殊指令使用) """
+        self.baud_combo.setCurrentText(str(baudrate))
+        if self.is_connected:
+            # 如果已连接，需要重新打开串口以应用新波特率
+            self.output_manager.append_text(f"正在切换波特率至: {baudrate}", OutputSource.SYSTEM)
+            self.close_serial()
+            QTimer.singleShot(100, self.open_serial)
+
+    def set_ending(self, ending_text):
+        """设置结尾标识符 (供特殊指令使用) """
+        # 映射常见的缩写或直接匹配
+        mapping = {
+            "none": "None",
+            "rn": r"\r\n",
+            "r": r"\r",
+            "n": r"\n"
+        }
+        target = mapping.get(ending_text.lower(), ending_text)
+        index = self.ending_combo.findText(target)
+        if index >= 0:
+            self.ending_combo.setCurrentIndex(index)
+            self.output_manager.append_text(f"已设置结尾标识符为: {target}", OutputSource.SYSTEM)
+        else:
+            self.output_manager.append_text(f"错误: 不支持的结尾标识符: {ending_text}", OutputSource.ERROR)
+
+    def trigger_send_mode(self, module_name):
+        """触发指定模块的连续发送 (供特殊指令使用) """
+        module_name = module_name.strip()
+        # 刷新模块列表以确保最新
+        self.refresh_modules()
+        
+        if module_name in self.modules or module_name == "全部":
+            self.module_combo.setCurrentText(module_name)
+            self.output_manager.append_text(f"触发模块跳转: {module_name} (仅发送一次)", OutputSource.SYSTEM)
+            
+            # 设置强制不循环标志
+            self._force_no_loop = True
+            
+            # 如果当前没有在连续发送，则启动
+            if not self.is_continuous_sending:
+                self.start_continuous_send()
             else:
-                # 普通命令, 直接发送
-                self.send_command(command, row)
+                # 如果已经在连续发送，我们需要停止当前的发送并重新开始。
+                # 注意：stop_continuous_sending 会清除 _force_no_loop，所以我们需要在之后重新设置
+                self.stop_continuous_sending()
+                self._force_no_loop = True
+                # 延迟一小段时间后重新启动，确保之前的定时器都已清理
+                QTimer.singleShot(self.interval_spin.value(), self.start_continuous_send)
+            return True
+        else:
+            self.output_manager.append_text(f"错误: 找不到模块 '{module_name}'", OutputSource.ERROR)
+            return False
 
     def on_cell_double_clicked(self, row, column):
         """单元格双击事件 - 编辑注释"""
@@ -817,6 +938,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def toggle_continuous_send(self):
         """切换连续发送状态"""
         if not self.is_continuous_sending:
+            # 手动启动时，清除强制不循环标志
+            if hasattr(self, '_force_no_loop'):
+                del self._force_no_loop
             self.start_continuous_send()
         else:
             self.stop_continuous_send()
@@ -841,6 +965,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def stop_continuous_sending(self):
         """停止连续发送"""
         self.is_continuous_sending = False
+        # 清除强制不循环标志
+        if hasattr(self, '_force_no_loop'):
+            del self._force_no_loop
+            
         self.continuous_btn.setText("连续发送")
         self.continuous_btn.setStyleSheet(f"""
             QPushButton {{
@@ -855,6 +983,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if not self.is_continuous_sending:
             return
 
+        # 获取当前的强制不循环标志
+        force_no_loop = getattr(self, '_force_no_loop', False)
+
         selected_module = self.module_combo.currentText()
 
         # 收集需要发送的命令
@@ -866,20 +997,38 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             if selected_module != "全部" and row not in self.modules.get(selected_module, []):
                 continue
 
-            if enable and command.strip():
-                commands_to_send.append((row, command, False))
-            elif not enable and re.match(r'^(\w+):(.*)$', command, re.IGNORECASE):
-                # 特殊指令
-                match = re.match(r'^(\w+):(.*)$', command, re.IGNORECASE)
-                command_type = match.group(1).lower()
-                param = match.group(2)
-                commands_to_send.append((row, command, True, command_type, param))
+            if enable:  # 只要勾选了就处理
+                # 检查是否为特殊指令
+                cmd_type_str, param = UIUtils.parse_special_command(command)
+                if cmd_type_str:
+                    # 尝试匹配枚举类型
+                    command_type = None
+                    for ct in SpecialCommandType:
+                        if ct.value == cmd_type_str:
+                            command_type = ct
+                            break
+
+                    if command_type:
+                        # 是已知的特殊指令
+                        commands_to_send.append((row, command, True, command_type, param))
+                    else:
+                        # 未知特殊指令，按普通命令处理
+                        unescaped_command = UIUtils.unescape_text(command)
+                        commands_to_send.append((row, unescaped_command, False))
+                else:
+                    # 普通命令
+                    unescaped_command = UIUtils.unescape_text(command)
+                    commands_to_send.append((row, unescaped_command, False))
+            else:
+                # 未勾选，但如果是 mode 指令，虽然不发送，但可能需要识别（目前逻辑是勾选才发送/执行）
+                # 这里保持原样，未勾选的不加入发送队列
+                pass
 
         # 发送命令
         def send_next_command(index=0):
             if not self.is_continuous_sending or index >= len(commands_to_send):
-                # 检查是否开启了循环发送
-                if self.is_continuous_sending and self.loop_send_check.isChecked() and commands_to_send:
+                # 检查是否开启了循环发送 (且没有被强制停止循环)
+                if not force_no_loop and self.is_continuous_sending and self.loop_send_check.isChecked() and commands_to_send:
                     # 等待循环间隔后再次开始
                     QTimer.singleShot(self.loop_interval_spin.value(), self.send_continuous_commands)
                 else:
@@ -891,7 +1040,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             if is_special:
                 # 处理特殊指令
                 command_type, param = special_args
-                if command_type == "delay":
+                if command_type == SpecialCommandType.DELAY:
                     try:
                         delay_ms = float(param.strip())
                         self.output_manager.append_text(f"连续发送延迟: {delay_ms}ms", OutputSource.SYSTEM)
@@ -899,7 +1048,40 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         return
                     except ValueError:
                         self.output_manager.append_text(f"错误: 无效的延迟参数: {param}", OutputSource.ERROR)
-                # 其他特殊指令在发送时忽略
+                elif command_type == SpecialCommandType.SENDHEX:
+                    # 执行 SendHex 指令
+                    if self.special_command_manager.execute(command_type, param, self):
+                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                    else:
+                        # 执行失败时记录错误并继续下一条，不中断连续发送
+                        self.output_manager.append_text(f"错误: SendHex 执行失败: {param}", OutputSource.ERROR)
+                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                    return
+                elif command_type == SpecialCommandType.BAUDRATE:
+                    # 执行 BaudRate 指令
+                    if self.special_command_manager.execute(command_type, param, self):
+                        # 波特率切换可能导致串口重启，等待 500ms 确保稳定
+                        QTimer.singleShot(500, lambda: send_next_command(index + 1))
+                    else:
+                        self.output_manager.append_text(f"错误: BaudRate 执行失败: {param}", OutputSource.ERROR)
+                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                    return
+                elif command_type == SpecialCommandType.SETENDLOG:
+                    # 执行 SetEndlog 指令
+                    if self.special_command_manager.execute(command_type, param, self):
+                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                    else:
+                        self.output_manager.append_text(f"错误: SetEndlog 执行失败: {param}", OutputSource.ERROR)
+                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                    return
+                elif command_type == SpecialCommandType.SENDMODE:
+                    # 执行 SendMode 指令
+                    # 注意：trigger_send_mode 会停止当前的连续发送并重新开始，
+                    # 所以这里不需要调用 send_next_command(index + 1)
+                    self.special_command_manager.execute(command_type, param, self)
+                    return
+                
+                # 其他特殊指令（如mode）在发送时忽略
                 QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
             else:
                 # 发送普通命令
@@ -920,7 +1102,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """停止连续发送 (公共接口) """
         self.stop_continuous_sending()
 
-    def refresh_modules(self):
+    def refresh_modules(self, silent=False):
         """刷新模块列表"""
         self.modules.clear()
         self.module_combo.clear()
@@ -933,16 +1115,17 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             enable, command, comment = self.command_table.get_row_data(row)
 
             # 检查是否为mode指令
-            if not enable and re.match(r'^mode:(.*)$', command, re.IGNORECASE):
-                match = re.match(r'^mode:(.*)$', command, re.IGNORECASE)
-                current_module = match.group(1).strip()
+            cmd_type_str, param = UIUtils.parse_special_command(command)
+            if not enable and cmd_type_str == "mode":
+                current_module = param.strip()
                 self.modules[current_module] = []
                 self.module_combo.addItem(current_module)
             else:
                 # 添加到当前模块
                 self.modules[current_module].append(row)
 
-        self.output_manager.append_text("模块列表已刷新", OutputSource.SYSTEM)
+        if not silent:
+            self.output_manager.append_text("模块列表已刷新", OutputSource.SYSTEM)
 
     def save_receive_data(self):
         """保存接收数据"""
@@ -1035,12 +1218,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 enable, command, comment = result
 
                 # 检查特殊指令
-                if not enable and re.match(r'^(\w+):(.*)$', command, re.IGNORECASE):
-                    match = re.match(r'^(\w+):(.*)$', command, re.IGNORECASE)
-                    keyword = match.group(1).lower()
-                    param = match.group(2)
-
-                    if keyword == 'mode':
+                cmd_type_str, param = UIUtils.parse_special_command(command)
+                if not enable and cmd_type_str:
+                    if cmd_type_str == 'mode':
                         current_module = param.strip()
                         self.modules[current_module] = []
                         self.module_combo.addItem(current_module)
@@ -1116,9 +1296,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def save_state(self):
         """保存当前状态到配置文件"""
         try:
-            state = {
-                "commands": self.command_table.get_all_commands(),
-                "send_settings": {
+            state = OrderedDict([
+                ("basic_settings", {
+                    "port": self.port_combo.currentText(),
+                    "baudrate": self.baud_combo.currentText(),
+                    "databits": self.data_bits_combo.currentText(),
+                    "parity": self.parity_combo.currentText(),
+                    "stopbits": self.stop_bits_combo.currentText()
+                }),
+                ("receive_settings", {
+                    "show_send_source": self.show_send_source_check.isChecked(),
+                    "show_recv_source": self.show_recv_source_check.isChecked(),
+                    "show_sys_source": self.show_sys_source_check.isChecked(),
+                    "show_err_source": self.show_err_source_check.isChecked()
+                }),
+                ("send_settings", {
                     "loop_send": self.loop_send_check.isChecked(),
                     "loop_interval": self.loop_interval_spin.value(),
                     "continuous_interval": self.interval_spin.value(),
@@ -1126,22 +1318,18 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     "send_color": self.send_color_combo.currentText(),
                     "ending": self.ending_combo.currentText(),
                     "selected_module": self.module_combo.currentText()
-                },
-                "serial_settings": {
-                    "port": self.port_combo.currentText(),
-                    "baudrate": self.baud_combo.currentText(),
-                    "databits": self.data_bits_combo.currentText(),
-                    "parity": self.parity_combo.currentText(),
-                    "stopbits": self.stop_bits_combo.currentText()
-                },
-                "other_settings": {
+                }),
+                ("other_settings", {
                     "show_timestamp": self.timestamp_check.isChecked()
-                },
-                "ui_state": {
-                    "h_splitter_sizes": self.h_splitter.sizes(),
+                }),
+                ("ui_settings", {
+                    "h_splitter_sizes": self.h_splitter.sizes()
+                }),
+                ("tool_settings", {
                     "tools_group_expanded": self.tools_group.isExpanded()
-                }
-            }
+                }),
+                ("commands", self.command_table.get_all_commands())
+            ])
             self.config_manager.set("last_state", state)
         except Exception as e:
             print(f"保存状态失败: {e}")
@@ -1155,7 +1343,32 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self._load_legacy_state()
                 return
 
-            # 加载发送设置
+            # 1. 基本设置
+            basic_settings = state.get("basic_settings") or state.get("serial_settings", {})
+            port = basic_settings.get("port")
+            if port and self.port_combo.findText(port) >= 0:
+                self.port_combo.setCurrentText(port)
+            self.baud_combo.setCurrentText(basic_settings.get("baudrate", "115200"))
+            self.data_bits_combo.setCurrentText(basic_settings.get("databits", "8"))
+            self.parity_combo.setCurrentText(basic_settings.get("parity", "None"))
+            self.stop_bits_combo.setCurrentText(basic_settings.get("stopbits", "1"))
+
+            # 2. 接收设置
+            receive_settings = state.get("receive_settings")
+            if receive_settings:
+                self.show_send_source_check.setChecked(receive_settings.get("show_send_source", True))
+                self.show_recv_source_check.setChecked(receive_settings.get("show_recv_source", True))
+                self.show_sys_source_check.setChecked(receive_settings.get("show_sys_source", True))
+                self.show_err_source_check.setChecked(receive_settings.get("show_err_source", True))
+            else:
+                # 兼容旧版本 (从 send_settings 中读取)
+                old_send_settings = state.get("send_settings", {})
+                self.show_send_source_check.setChecked(old_send_settings.get("show_send_source", True))
+                self.show_recv_source_check.setChecked(old_send_settings.get("show_recv_source", True))
+                self.show_sys_source_check.setChecked(old_send_settings.get("show_sys_source", True))
+                self.show_err_source_check.setChecked(old_send_settings.get("show_err_source", True))
+
+            # 3. 发送设置
             send_settings = state.get("send_settings", {})
             self.loop_send_check.setChecked(send_settings.get("loop_send", False))
             self.loop_interval_spin.setValue(send_settings.get("loop_interval", 1000))
@@ -1164,28 +1377,19 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.send_color_combo.setCurrentText(send_settings.get("send_color", "红色"))
             self.ending_combo.setCurrentText(send_settings.get("ending", r"\r\n"))
             
-            # 加载基本设置
-            serial_settings = state.get("serial_settings", {})
-            port = serial_settings.get("port")
-            if port and self.port_combo.findText(port) >= 0:
-                self.port_combo.setCurrentText(port)
-            self.baud_combo.setCurrentText(serial_settings.get("baudrate", "115200"))
-            self.data_bits_combo.setCurrentText(serial_settings.get("databits", "8"))
-            self.parity_combo.setCurrentText(serial_settings.get("parity", "None"))
-            self.stop_bits_combo.setCurrentText(serial_settings.get("stopbits", "1"))
-            
-            # 加载其他设置
+            # 4. 其他设置
             other_settings = state.get("other_settings", {})
             self.timestamp_check.setChecked(other_settings.get("show_timestamp", False))
 
-            # 加载分割器状态
-            ui_state = state.get("ui_state", {})
-            h_sizes = ui_state.get("h_splitter_sizes")
+            # 5. UI 设置
+            ui_settings = state.get("ui_settings") or state.get("ui_state", {})
+            h_sizes = ui_settings.get("h_splitter_sizes")
             if h_sizes:
                 self.h_splitter.setSizes(h_sizes)
             
-            # 加载折叠状态
-            self.tools_group.setExpanded(ui_state.get("tools_group_expanded", False))
+            # 6. 工具设置
+            tool_settings = state.get("tool_settings") or state.get("ui_state", {})
+            self.tools_group.setExpanded(tool_settings.get("tools_group_expanded", False))
 
             # 加载命令
             saved_commands = state.get("commands")

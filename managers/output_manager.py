@@ -5,15 +5,20 @@ from widgets.custom_widgets import CustomTextBrowser
 
 class OutputManager:
     """统一输出管理器"""
-    def __init__(self, text_browser:CustomTextBrowser, timestamp_check, show_send_check, send_color_getter):
+    def __init__(self, text_browser:CustomTextBrowser, timestamp_check, show_send_check, send_color_getter, source_filter_getter=None):
         self.text_browser = text_browser
         self.timestamp_check = timestamp_check
         self.show_send_check = show_send_check
         self.send_color_getter = send_color_getter
+        self.source_filter_getter = source_filter_getter
         self.last_receive_timestamp = True  # 控制接收数据时间戳显示
 
     def append_text(self, text, source_type, color=None):
         """统一添加文本到显示区"""
+        # 检查是否启用了该来源类型的输出
+        if self.source_filter_getter and not self.source_filter_getter(source_type):
+            return
+
         cursor = self.text_browser.textCursor()
         cursor.movePosition(QTextCursor.End)
 

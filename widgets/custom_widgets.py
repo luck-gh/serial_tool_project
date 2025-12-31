@@ -2,10 +2,19 @@ import os
 import subprocess
 import sys
 from PyQt5.QtWidgets import (QTextEdit, QTextBrowser, QAction, QMessageBox, 
-                             QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFrame, QSizePolicy)
+                             QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFrame, QSizePolicy,
+                             QComboBox)
 from PyQt5.QtCore import Qt, pyqtSignal
 from utils.ui_utils import UIUtils, resource_path, OutputSource, SpecialCommandType
 from widgets.base_widgets import BaseWidgetMixin
+
+class ClickableComboBox(QComboBox):
+    """点击下拉菜单时触发信号的组合框"""
+    popupAboutToBeShown = pyqtSignal()
+
+    def showPopup(self):
+        self.popupAboutToBeShown.emit()
+        super().showPopup()
 
 class ExpandingTextEdit(QTextEdit):
     """一个可以根据内容自动扩展高度的文本编辑框"""
@@ -106,6 +115,12 @@ class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
         self.add_number_converter_actions(menu, self.config_manager, selected_text)
 
         menu.exec_(self.mapToGlobal(position))
+
+    def keyPressEvent(self, event):
+        """处理快捷键"""
+        if self.handle_common_shortcuts(event):
+            return
+        super().keyPressEvent(event)
 
 class CollapsibleGroupBox(QWidget):
     """一个可以折叠的容器控件，支持水平或垂直折叠"""

@@ -1,3 +1,10 @@
-﻿*.pyc
+﻿.settings/*
+Debug/*
+.claude
+*.pyc
 *.exe
 build/*
+dist/*
+__pycache__/
+.env
+.vscode/

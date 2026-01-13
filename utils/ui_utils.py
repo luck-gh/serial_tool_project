@@ -5,6 +5,33 @@ from enum import Enum
 from PyQt5.QtWidgets import QMenu
 from PyQt5.QtGui import QColor
 
+# 统一使用公共资源定位实现，默认导入共享模块；若导入失败则回退为本地实现
+try:
+    from common_utils.resource import resource_path
+except Exception:
+    # 回退实现（兼容原有逻辑）
+    def resource_path(relative_path):
+        """
+        获取资源的绝对路径, 兼容开发环境和PyInstaller打包环境。
+        在打包环境中, 会尝试在相对路径和根路径下寻找资源。
+        """
+        try:
+            base_path = sys._MEIPASS
+
+            path1 = os.path.join(base_path, relative_path)
+            if os.path.exists(path1):
+                return path1
+
+            path2 = os.path.join(base_path, os.path.basename(relative_path))
+            if os.path.exists(path2):
+                return path2
+
+            return path1
+
+        except Exception:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return os.path.join(base_path, relative_path)
+
 class OutputSource(Enum):
     """输出来源类型"""
     SEND = "send"      # 发送数据
@@ -22,33 +49,8 @@ class SpecialCommandType(Enum):
     SETENDLOG = "setendlog" # 结尾符设置
     SENDMODE = "sendmode"   # 发送指定模块
 
-def resource_path(relative_path):
-    """
-    获取资源的绝对路径, 兼容开发环境和PyInstaller打包环境。
-    在打包环境中, 会尝试在相对路径和根路径下寻找资源。
-    """
-    try:
-        # PyInstaller创建的临时文件夹
-        base_path = sys._MEIPASS
-        
-        # 尝试完整的相对路径
-        path1 = os.path.join(base_path, relative_path)
-        if os.path.exists(path1):
-            return path1
-            
-        # 尝试只在根目录下寻找文件名 (处理--add-data data.txt:.的情况)
-        path2 = os.path.join(base_path, os.path.basename(relative_path))
-        if os.path.exists(path2):
-            return path2
-            
-        # 如果都找不到, 返回原始的相对路径 (可能会失败, 但作为后备)
-        return path1
-
-    except Exception:
-        # 在开发环境中, 使用当前文件所在目录的父目录作为根目录
-        # ui_utils.py 在 utils/ 目录下, 所以其父目录是项目根目录
-        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_path, relative_path)
+# `resource_path` 已由顶部尝试导入共享实现并保留回退实现，
+# 因此删除本地重复定义以避免覆盖或重复声明。
 
 class Colors:
     """全局颜色配置"""

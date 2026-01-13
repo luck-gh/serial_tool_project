@@ -26,8 +26,11 @@ datas = [(os.path.join(spec_dir, 'resources'), 'resources')]
 if bundle_calc:
     if calc_exists:
         # 将父目录加入路径，这样可以作为包导入 number_converter_project
+        # 把主工程的父目录加入 pathex，确保子工程包可被找到
         pathex.append(os.path.dirname(spec_dir))
+        # 明确列出隐藏导入，避免打包时被遗漏
         hiddenimports.append('number_converter_project.number_conversion_dialog')
+        # 如果需要，也可以显式添加子工程资源目录到 datas, 示例已包含对整个子工程的文件收集
         
         # 收集需要的文件，排除 dist, build, __pycache__, .git 等
         excluded_dirs = {'dist', 'build', '__pycache__', '.git', '.idea', '.vscode'}

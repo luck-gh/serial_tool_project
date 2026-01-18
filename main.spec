@@ -1,5 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""
 # pyinstaller main.spec
+"""
+"""
+串口工具 PyInstaller 打包配置
+支持独立打包和集成打包
+"""
 import os
 
 # 获取当前工作目录

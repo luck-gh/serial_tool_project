@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (QApplication, QStyleFactory)
 from main_window import SerialTool
 import datetime
 
-TOOL_VERSION = "1.0.1"
+TOOL_VERSION = "1.1.1"
 TOOL_VERSION_DATE = datetime.datetime(2025, 12, 2, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
 
 def main():

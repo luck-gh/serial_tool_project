@@ -41,14 +41,25 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.is_continuous_sending = False
         self.current_module = "全部"
         self.modules = OrderedDict()  # 存储模块信息
-        
+
         # 使用可执行文件名来构建配置文件名
         config_file = f"{self.exe_name}_config.json"
-        self.config_manager = ConfigManager(
-            tool_version=self.tool_version,
-            tool_version_date=self.tool_version_date,
-            config_file=config_file
-        )
+        try:
+            self.config_manager = ConfigManager(
+                tool_version=self.tool_version,
+                tool_version_date=self.tool_version_date,
+                config_file=config_file
+            )
+        except ValueError as e:
+            # 配置文件版本过高
+            QMessageBox.critical(
+                None,
+                "配置文件版本错误",
+                str(e)
+            )
+            # 退出程序
+            sys.exit(1)
+
         self.special_command_manager = SpecialCommandManager(self.config_manager)
 
         self.init_ui()
@@ -233,13 +244,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.update_tools_state()
 
     def update_tools_state(self):
-        """根据配置更新工具按钮状态"""
-        is_enabled = self.config_manager.is_tool_enabled("number_conversion_dialog")
-        self.calc_btn.setEnabled(is_enabled)
-        if is_enabled:
-            self.calc_btn.setStyleSheet(f"QPushButton {{ background-color: {Colors.BLUE_BUTTON}; color: white; }}")
-        else:
-            self.calc_btn.setStyleSheet("QPushButton {{ background-color: #cccccc; color: #888888; }}")
+        """根据配置更新所有工具按钮状态（通用方法）"""
+        for tool_name, button in self.tool_buttons.items():
+            is_enabled = self.config_manager.is_tool_enabled(tool_name)
+            button.setEnabled(is_enabled)
+
+            if is_enabled:
+                button.setStyleSheet(f"QPushButton {{ background-color: {Colors.BLUE_BUTTON}; color: white; }}")
+            else:
+                button.setStyleSheet("QPushButton {{ background-color: #cccccc; color: #888888; }}")
 
     def create_left_panel(self):
         """创建左侧设置面板 (可滚动) """
@@ -273,7 +286,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
 
         # 下拉菜单的最小宽度
-        minimumWidth = 180
+        minimumWidth = 200
         # 端口选择
         port_layout = QHBoxLayout()
         port_layout.addWidget(QLabel("端口:"))
@@ -281,7 +294,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.port_combo.setEditable(True)
         self.port_combo.popupAboutToBeShown.connect(self.refresh_ports)
         self.port_combo.installEventFilter(self)            # 禁用滚轮
-        self.port_combo.setMinimumWidth(minimumWidth)       # 设置最小宽度
+        self.port_combo.setFixedWidth(minimumWidth)         # 设置固定宽度
         port_layout.addWidget(self.refresh_ports_btn)
         port_layout.addWidget(self.port_combo)
         basic_layout.addLayout(port_layout)
@@ -294,7 +307,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.baud_combo.addItems(["9600", "115200", "57600", "38400", "19200", "4800"])
         self.baud_combo.setCurrentText("115200")
         self.baud_combo.installEventFilter(self)            # 禁用滚轮
-        self.baud_combo.setMinimumWidth(minimumWidth)       # 设置最小宽度
+        self.baud_combo.setFixedWidth(minimumWidth)         # 设置固定宽度
         baud_layout.addWidget(self.baud_combo)
         basic_layout.addLayout(baud_layout)
 
@@ -305,7 +318,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.data_bits_combo.addItems(["5", "6", "7", "8"])
         self.data_bits_combo.setCurrentText("8")
         self.data_bits_combo.installEventFilter(self)       # 禁用滚轮
-        self.data_bits_combo.setMinimumWidth(minimumWidth)  # 设置最小宽度
+        self.data_bits_combo.setFixedWidth(minimumWidth)    # 设置固定宽度
         data_bits_layout.addWidget(self.data_bits_combo)
         basic_layout.addLayout(data_bits_layout)
 
@@ -316,7 +329,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.parity_combo.addItems(["None", "Even", "Odd", "Mark"])
         self.parity_combo.setCurrentText("None")
         self.parity_combo.installEventFilter(self)          # 禁用滚轮
-        self.parity_combo.setMinimumWidth(minimumWidth)     # 设置最小宽度
+        self.parity_combo.setFixedWidth(minimumWidth)       # 设置固定宽度
         parity_layout.addWidget(self.parity_combo)
         basic_layout.addLayout(parity_layout)
 
@@ -327,7 +340,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.stop_bits_combo.addItems(["1", "1.5", "2"])
         self.stop_bits_combo.setCurrentText("1")
         self.stop_bits_combo.installEventFilter(self)       # 禁用滚轮
-        self.stop_bits_combo.setMinimumWidth(minimumWidth)  # 设置最小宽度
+        self.stop_bits_combo.setFixedWidth(minimumWidth)    # 设置固定宽度
         stop_bits_layout.addWidget(self.stop_bits_combo)
         basic_layout.addLayout(stop_bits_layout)
 
@@ -486,8 +499,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 工具相关
         self.tools_group = CollapsibleGroupBox("工具相关")
-        self.calc_btn = QPushButton("位计算器")
-        self.tools_group.addWidget(self.calc_btn)
+
+        # 动态创建工具按钮（基于配置管理器的注册表）
+        self.tool_buttons = {}  # 保存工具按钮引用 {tool_name: button}
+        for tool_name in self.config_manager.get_all_tool_names():
+            button_text = self.config_manager.get_tool_button_text(tool_name)
+            btn = QPushButton(button_text)
+            self.tools_group.addWidget(btn)
+            self.tool_buttons[tool_name] = btn
+
         layout.addWidget(self.tools_group)
 
         # 配置按钮
@@ -631,16 +651,58 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.refresh_modules_btn.clicked.connect(self.refresh_modules)
         self.config_btn.clicked.connect(self.open_config_dialog)
         self.jump_to_module_btn.clicked.connect(self._jump_to_module_row)
-        self.calc_btn.clicked.connect(self.open_bit_calculator)
+
+        # 连接工具按钮（动态连接，基于工具名映射到方法）
+        tool_method_map = {
+            "number_conversion_dialog": self.open_bit_calculator,
+            "bin_hex_converter": self.open_bin_hex_converter,
+            "firmware_downloader": self.open_firmware_downloader,
+        }
+        for tool_name, button in self.tool_buttons.items():
+            if tool_name in tool_method_map:
+                # 为每个按钮创建带反馈的包装函数
+                method = tool_method_map[tool_name]
+                button.clicked.connect(lambda _, btn=button, m=method: self._tool_button_clicked(btn, m))
+
+    def _tool_button_clicked(self, button, method):
+        """工具按钮点击处理 - 添加视觉反馈"""
+        # 添加视觉反馈 - 按钮闪烁和颜色变化
+        original_style = button.styleSheet()
+        button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: button.setStyleSheet(original_style))
+
+        # 调用实际的工具方法
+        method()
 
     def refresh_ports(self):
         """刷新可用串口列表"""
+        # 添加视觉反馈 - 按钮闪烁和颜色变化
+        self.refresh_ports_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.refresh_ports_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.GREEN_BUTTON};
+                color: white;
+            }}
+        """))
+
         current_text = self.port_combo.currentText()
         self.port_combo.clear()
 
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            self.port_combo.addItem(port.device)
+            self.port_combo.addItem(f"{port.device} - {port.description}")
 
         # 恢复之前的选择
         if current_text and self.port_combo.findText(current_text) >= 0:
@@ -655,7 +717,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def open_serial(self):
         """打开串口"""
-        port = self.port_combo.currentText()
+        port_text = self.port_combo.currentText()
+        port = port_text.split(' ')[0]
         if not port:
             self.output_manager.append_text("错误: 请选择串口", OutputSource.ERROR)
             return
@@ -1075,10 +1138,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
                 elif command_type == SpecialCommandType.SENDMODE:
-                    # 执行 SendMode 指令
-                    # 注意：trigger_send_mode 会停止当前的连续发送并重新开始，
-                    # 所以这里不需要调用 send_next_command(index + 1)
-                    self.special_command_manager.execute(command_type, param, self)
+                    # 执行 SendMode 指令 - 发送指定模块的内容后继续当前模块
+                    def on_sendmode_complete():
+                        # SendMode 执行完毕后，继续当前模块的下一条命令
+                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+
+                    self.special_command_manager.execute_sendmode_inline(param.strip(), self, on_sendmode_complete)
                     return
                 
                 # 其他特殊指令（如mode）在发送时忽略
@@ -1104,6 +1169,26 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def refresh_modules(self, silent=False):
         """刷新模块列表"""
+        # 添加视觉反馈 - 按钮闪烁和颜色变化
+        if not silent:
+            # 闪烁效果：改变按钮样式为运行中状态
+            self.refresh_modules_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.RED_BUTTON};
+                    color: white;
+                }}
+            """)
+            # 200ms后恢复原始样式
+            QTimer.singleShot(200, lambda: self.refresh_modules_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.GREEN_BUTTON};
+                    color: white;
+                }}
+            """))
+
+        # 保存当前选择
+        current_selection = self.module_combo.currentText() if self.module_combo.currentText() else "全部"
+
         self.modules.clear()
         self.module_combo.clear()
         self.module_combo.addItem("全部")
@@ -1123,6 +1208,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             else:
                 # 添加到当前模块
                 self.modules[current_module].append(row)
+
+        # 恢复之前的选择(如果仍然存在)
+        if current_selection and self.module_combo.findText(current_selection) >= 0:
+            self.module_combo.setCurrentText(current_selection)
 
         if not silent:
             self.output_manager.append_text("模块列表已刷新", OutputSource.SYSTEM)
@@ -1165,8 +1254,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 处理注释行 (//或#开头)
         if line.startswith('//') or line.startswith('#'):
-            comment_text = line.lstrip('/#').strip()
-            return False, "", comment_text
+            return None  # 跳过表头注释
 
         # 解析CSV格式
         parts = [part.strip() for part in line.split(',', 2)]
@@ -1174,14 +1262,19 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if len(parts) < 2:
             return None
 
+        # 检查第一列是否为True/False
+        if parts[0].lower() not in ['true', 'false']:
+            return None  # 跳过非数据行
+
         # 解析选择框
         try:
             enable = parts[0].lower() == 'true'
         except:
             enable = False
 
-        command = parts[1]
-        comment = parts[2] if len(parts) > 2 else ""
+        # 反转义命令和注释中的转义字符
+        command = UIUtils.unescape_csv_text(parts[1])
+        comment = UIUtils.unescape_csv_text(parts[2]) if len(parts) > 2 else ""
 
         return enable, command, comment
 
@@ -1251,7 +1344,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         if not filename:
             return
-        
+
         self.config_manager.set_last_used_directory(os.path.dirname(filename))
 
         try:
@@ -1262,7 +1355,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
                 commands = self.command_table.get_all_commands()
                 for enable, command, comment in commands:
-                    writer.writerow([str(enable), command, comment])
+                    # 转义不可见字符，避免破坏CSV格式
+                    escaped_command = UIUtils.escape_text(command)
+                    escaped_comment = UIUtils.escape_text(comment)
+                    writer.writerow([str(enable), escaped_command, escaped_comment])
 
             self.output_manager.append_text(f"模板已导出: {filename}", OutputSource.SYSTEM)
 

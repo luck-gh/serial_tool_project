@@ -91,6 +91,138 @@ class SpecialCommandManager:
             return context.trigger_send_mode(param.strip())
         return False
 
+    def execute_sendmode_inline(self, module_name, context, completion_callback=None):
+        """内联执行 SendMode 指令 - 发送指定模块后返回继续当前模块
+
+        Args:
+            module_name: 模块名称
+            context: 上下文对象
+            completion_callback: 完成后的回调函数（可选）
+
+        Returns:
+            bool: 是否成功启动执行（不代表执行完成）
+        """
+        from PyQt5.QtCore import QTimer
+        from utils.ui_utils import UIUtils, OutputSource
+
+        module_name = module_name.strip()
+
+        # 刷新模块列表以确保最新
+        if hasattr(context, 'refresh_modules'):
+            context.refresh_modules(silent=True)
+
+        if not hasattr(context, 'modules') or not hasattr(context, 'command_table'):
+            if completion_callback:
+                completion_callback()
+            return False
+
+        # 检查模块是否存在
+        if module_name not in context.modules and module_name != "全部":
+            if hasattr(context, 'output_manager'):
+                context.output_manager.append_text(f"错误: 找不到模块 '{module_name}'", OutputSource.ERROR)
+            if completion_callback:
+                completion_callback()
+            return False
+
+        # 收集目标模块的命令
+        commands_to_send = []
+        for row in range(context.command_table.rowCount()):
+            enable, command, comment = context.command_table.get_row_data(row)
+
+            # 检查是否属于目标模块
+            if module_name != "全部" and row not in context.modules.get(module_name, []):
+                continue
+
+            if enable:  # 只发送勾选的命令
+                # 检查是否为特殊指令
+                cmd_type_str, param = UIUtils.parse_special_command(command)
+                if cmd_type_str:
+                    # 处理特殊指令
+                    from utils.ui_utils import SpecialCommandType
+                    command_type = None
+                    for ct in SpecialCommandType:
+                        if ct.value == cmd_type_str:
+                            command_type = ct
+                            break
+
+                    if command_type:
+                        commands_to_send.append((row, command, True, command_type, param))
+                    else:
+                        unescaped_command = UIUtils.unescape_text(command)
+                        commands_to_send.append((row, unescaped_command, False))
+                else:
+                    # 普通命令
+                    unescaped_command = UIUtils.unescape_text(command)
+                    commands_to_send.append((row, unescaped_command, False))
+
+        if not commands_to_send:
+            if hasattr(context, 'output_manager'):
+                context.output_manager.append_text(f"警告: 模块 '{module_name}' 中没有启用的命令", OutputSource.SYSTEM)
+            if completion_callback:
+                completion_callback()
+            return True  # 返回 True 表示执行完成（虽然没发送内容）
+
+        if hasattr(context, 'output_manager'):
+            context.output_manager.append_text(f"SendMode: 发送模块 '{module_name}' 的内容", OutputSource.SYSTEM)
+
+        # 发送命令（同步方式，使用延迟链）
+        def send_module_command(index=0):
+            if index >= len(commands_to_send):
+                # 模块发送完成，调用完成回调
+                if completion_callback:
+                    completion_callback()
+                return
+
+            row, command, is_special, *special_args = commands_to_send[index]
+
+            if is_special:
+                # 处理特殊指令
+                command_type, param = special_args
+                if command_type == SpecialCommandType.DELAY:
+                    try:
+                        delay_ms = float(param.strip())
+                        if hasattr(context, 'output_manager'):
+                            context.output_manager.append_text(f"SendMode 延迟: {delay_ms}ms", OutputSource.SYSTEM)
+                        QTimer.singleShot(int(delay_ms), lambda: send_module_command(index + 1))
+                        return
+                    except ValueError:
+                        if hasattr(context, 'output_manager'):
+                            context.output_manager.append_text(f"错误: 无效的延迟参数: {param}", OutputSource.ERROR)
+                elif command_type == SpecialCommandType.SENDHEX:
+                    if self.execute(command_type, param, context):
+                        interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                        QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+                    else:
+                        if hasattr(context, 'output_manager'):
+                            context.output_manager.append_text(f"错误: SendHex 执行失败: {param}", OutputSource.ERROR)
+                        interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                        QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+                    return
+                elif command_type == SpecialCommandType.SENDMODE:
+                    # 嵌套的 SendMode - 递归调用，传入完成回调
+                    def on_nested_sendmode_complete():
+                        interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                        QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+
+                    self.execute_sendmode_inline(param.strip(), context, on_nested_sendmode_complete)
+                    return
+                # 其他特殊指令跳过
+                interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+            else:
+                # 发送普通命令
+                if hasattr(context, 'send_command') and context.send_command(command, row):
+                    interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                    QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+                else:
+                    # 发送失败，跳过并继续
+                    interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                    QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+
+        # 开始发送模块命令
+        send_module_command()
+        return True
+
     def get_command_names(self):
         """获取所有指令名称"""
         return [cmd.value for cmd in self.commands.keys()]

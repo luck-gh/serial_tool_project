@@ -117,6 +117,64 @@ class UIUtils:
         return result
 
     @staticmethod
+    def escape_text(text):
+        """
+        转义不可见字符和反斜杠,用于CSV导出等场景
+        将 \t, \n, \r 等不可见字符转义为可见的字符串表示
+        同时将已存在的反斜杠转义为双反斜杠
+        """
+        if not text:
+            return ""
+
+        # 先转义反斜杠(必须首先处理,避免二次转义)
+        result = text.replace('\\', '\\\\')
+
+        # 然后转义不可见字符
+        replacements = {
+            '\t': '\\t',
+            '\n': '\\n',
+            '\r': '\\r',
+            '\0': '\\0',
+            '\b': '\\b',
+            '\f': '\\f',
+            '\v': '\\v'
+        }
+        for char, escaped in replacements.items():
+            result = result.replace(char, escaped)
+        return result
+
+    @staticmethod
+    def unescape_csv_text(text):
+        """
+        反转义CSV导入的文本
+        将 \\t, \\n, \\r 等转义序列还原为不可见字符
+        将 \\\\ 还原为单个反斜杠
+        """
+        if not text:
+            return ""
+
+        # 使用正则表达式处理转义序列
+        import re
+
+        def replace_escape(match):
+            escape_char = match.group(1)
+            escape_map = {
+                't': '\t',
+                'n': '\n',
+                'r': '\r',
+                '0': '\0',
+                'b': '\b',
+                'f': '\f',
+                'v': '\v',
+                '\\': '\\'
+            }
+            return escape_map.get(escape_char, '\\' + escape_char)
+
+        # 匹配 \\ 后跟一个字符
+        result = re.sub(r'\\(.)', replace_escape, text)
+        return result
+
+    @staticmethod
     def create_styled_menu(parent):
         """创建一个带统一样式的QMenu"""
         menu = QMenu(parent)

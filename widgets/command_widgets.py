@@ -98,8 +98,15 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
             # 使用与paintEvent中相同的字体来计算所需空间
             comment_font = QFont("Arial", 8)
             font_metrics = QFontMetrics(comment_font)
-            # 额外增加一点边距, 比如 10px
-            margin = font_metrics.horizontalAdvance(self.comment_text) + 10
+            comment_width = font_metrics.horizontalAdvance(self.comment_text)
+
+            # 如果注释太长(超过控件宽度的40%),不设置边距,让paintEvent根据文本长度自动隐藏
+            max_comment_width = self.width() * 0.4
+            if comment_width > max_comment_width:
+                margin = 0
+            else:
+                # 额外增加一点边距, 比如 10px
+                margin = comment_width + 10
         else:
             margin = 0
         self.setTextMargins(0, 0, margin, 0)
@@ -112,16 +119,28 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         if not self.comment_text:
             return
 
+        # 只在输入框为空或输入文本较短时才显示注释
+        current_text = self.text()
+        if current_text:
+            # 计算当前文本的显示宽度
+            font_metrics = self.fontMetrics()
+            text_width = font_metrics.horizontalAdvance(current_text)
+            # 获取可视区域宽度（考虑边距和滚动）
+            visible_width = self.width() - self.textMargins().right() - 20  # 留出一些缓冲
+
+            # 如果输入文本已经占用了大部分空间，不显示注释
+            if text_width > visible_width * 0.6:
+                return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # 设置注释文字颜色和字体
-        painter.setPen(QColor(100, 100, 100))
+        # 设置注释文字颜色和字体（半透明灰色）
+        painter.setPen(QColor(150, 150, 150, 180))
         font = QFont("Arial", 8)
         painter.setFont(font)
 
         # 在右侧绘制注释文本
-        # 移除垂直方向的-2调整, 确保有足够的高度来绘制j/g/p等字符的下半部分
         text_rect = self.rect().adjusted(5, 0, -5, 0)
         painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, self.comment_text)
 

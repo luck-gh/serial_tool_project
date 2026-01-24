@@ -816,6 +816,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def open_config_dialog(self):
         """打开配置对话框"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.config_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.config_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BLUE_BUTTON};
+                color: white;
+            }}
+        """))
+
         dialog = ConfigDialog(self.config_manager, self)
         if dialog.exec_():
             # 配置已保存，可以执行一些刷新操作
@@ -895,6 +910,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def add_command(self):
         """添加新命令"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.add_command_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.add_command_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.GREEN_BUTTON};
+                color: white;
+            }}
+        """))
+
         row = self.command_table.rowCount()
         # 直接添加行, add_command_row内部已经处理了按钮连接, 不需要再次连接
         self.command_table.add_command_row(False, "", "", row)
@@ -1014,6 +1044,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
             return
 
+        # 获取当前选中的模块名称
+        selected_module = self.module_combo.currentText()
+
         self.is_continuous_sending = True
         self.continuous_btn.setText("停止")
         self.continuous_btn.setStyleSheet(f"""
@@ -1022,6 +1055,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 color: white;
             }}
         """)
+
+        # 添加系统消息显示当前发送的模块名称
+        self.output_manager.append_text(f"开始连续发送模块: '{selected_module}'", OutputSource.SYSTEM)
+
         # 使用单次定时器启动连续发送
         QTimer.singleShot(0, self.send_continuous_commands)
 
@@ -1045,9 +1082,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """发送连续命令"""
         if not self.is_continuous_sending:
             return
-
-        # 获取当前的强制不循环标志
-        force_no_loop = getattr(self, '_force_no_loop', False)
 
         selected_module = self.module_combo.currentText()
 
@@ -1089,9 +1123,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 发送命令
         def send_next_command(index=0):
+            # 检查是否需要跳过到循环（StopContinuous:0 的效果）
+            if getattr(self, '_skip_to_loop', False):
+                self._skip_to_loop = False  # 清除标志
+                # 立即跳转到循环检查逻辑
+                index = len(commands_to_send)  # 设置为最后，触发循环检查
+
             if not self.is_continuous_sending or index >= len(commands_to_send):
-                # 检查是否开启了循环发送 (且没有被强制停止循环)
-                if not force_no_loop and self.is_continuous_sending and self.loop_send_check.isChecked() and commands_to_send:
+                # 检查是否开启了循环发送
+                if self.is_continuous_sending and self.loop_send_check.isChecked() and commands_to_send:
                     # 等待循环间隔后再次开始
                     QTimer.singleShot(self.loop_interval_spin.value(), self.send_continuous_commands)
                 else:
@@ -1145,7 +1185,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
                     self.special_command_manager.execute_sendmode_inline(param.strip(), self, on_sendmode_complete)
                     return
-                
+                elif command_type == SpecialCommandType.STOPCONTINUOUS:
+                    # 执行 StopContinuous 指令
+                    self.special_command_manager.execute(command_type, param, self)
+                    # 如果设置了 _skip_to_loop 标志（模式0），立即触发循环检查
+                    # 否则（模式1）会调用 stop_continuous_sending，is_continuous_sending 会变为 False
+                    send_next_command(len(commands_to_send))  # 跳转到结束，触发循环检查
+                    return
+
                 # 其他特殊指令（如mode）在发送时忽略
                 QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
             else:
@@ -1218,6 +1265,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def save_receive_data(self):
         """保存接收数据"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.GREEN_BUTTON};
+                color: white;
+            }}
+        """))
+
         filename, _ = QFileDialog.getSaveFileName(
             self, "保存接收数据", "", "Text Files (*.txt);;All Files (*)")
 
@@ -1231,7 +1293,23 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def clear_receive_data(self):
         """清空接收数据"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.clear_receive_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.clear_receive_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.GREEN_BUTTON};
+                color: white;
+            }}
+        """))
+
         self.output_manager.clear()
+        self.output_manager.append_text("接收数据已清空", OutputSource.SYSTEM)
 
     def update_statistics(self):
         """更新统计信息"""
@@ -1240,59 +1318,53 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def reset_statistics(self):
         """复位统计"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.reset_stats_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.reset_stats_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BLUE_BUTTON};
+                color: white;
+            }}
+        """))
+
         self.send_count = 0
         self.receive_count = 0
         self.update_statistics()
-
-    def parse_template_line(self, line):
-        """解析模板行"""
-        line = line.strip()
-
-        # 跳过空行
-        if not line:
-            return None
-
-        # 处理注释行 (//或#开头)
-        if line.startswith('//') or line.startswith('#'):
-            return None  # 跳过表头注释
-
-        # 解析CSV格式
-        parts = [part.strip() for part in line.split(',', 2)]
-
-        if len(parts) < 2:
-            return None
-
-        # 检查第一列是否为True/False
-        if parts[0].lower() not in ['true', 'false']:
-            return None  # 跳过非数据行
-
-        # 解析选择框
-        try:
-            enable = parts[0].lower() == 'true'
-        except:
-            enable = False
-
-        # 反转义命令和注释中的转义字符
-        command = UIUtils.unescape_csv_text(parts[1])
-        comment = UIUtils.unescape_csv_text(parts[2]) if len(parts) > 2 else ""
-
-        return enable, command, comment
+        self.output_manager.append_text("统计数据已复位", OutputSource.SYSTEM)
 
     def import_template(self):
         """导入模板"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.import_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.import_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.GREEN_BUTTON};
+                color: white;
+            }}
+        """))
+
         last_dir = self.config_manager.get_last_used_directory()
         filename, _ = QFileDialog.getOpenFileName(
             self, "导入模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
 
         if not filename:
             return
-        
+
         self.config_manager.set_last_used_directory(os.path.dirname(filename))
 
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-
             # 清空现有命令
             self.command_table.clear_all()
             self.modules.clear()
@@ -1303,30 +1375,60 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.modules[current_module] = []
 
             row = 0
-            for line in lines:
-                result = self.parse_template_line(line)
-                if result is None:
-                    continue
+            with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.reader(f)
+                for csv_row in reader:
+                    # 跳过空行
+                    if not csv_row or len(csv_row) == 0:
+                        continue
 
-                enable, command, comment = result
+                    # 跳过注释行（第一列以//或#开头）
+                    if csv_row[0].strip().startswith('//') or csv_row[0].strip().startswith('#'):
+                        continue
 
-                # 检查特殊指令
-                cmd_type_str, param = UIUtils.parse_special_command(command)
-                if not enable and cmd_type_str:
-                    if cmd_type_str == 'mode':
-                        current_module = param.strip()
-                        self.modules[current_module] = []
-                        self.module_combo.addItem(current_module)
-                    # delay指令会在发送时处理
+                    # 检查是否为有效数据行（至少2列）
+                    if len(csv_row) < 2:
+                        continue
 
-                # 添加命令到表格 (保持行号对应)
-                send_btn = self.command_table.add_command_row(enable, command, comment, row)
+                    # 解析第一列（True/False）
+                    enable_str = csv_row[0].strip().lower()
+                    if enable_str not in ['true', 'false']:
+                        continue  # 跳过非数据行
 
-                # 添加到当前模块 (非注释行和特殊指令行)
-                if not (enable == False and command == "" and comment):  # 不是纯注释行
-                    self.modules[current_module].append(row)
+                    enable = (enable_str == 'true')
 
-                row += 1
+                    # 解析命令和注释
+                    # 第2列是命令，第3列及之后的所有内容都是注释（包括逗号）
+                    command = UIUtils.unescape_csv_text(csv_row[1].strip())
+
+                    # 如果有第3列及以后的内容，将它们全部合并为注释
+                    if len(csv_row) > 2:
+                        # 将第3列及之后的所有列用逗号连接起来作为完整注释
+                        comment_parts = [csv_row[i].strip() for i in range(2, len(csv_row))]
+                        comment = ','.join(comment_parts)
+                        comment = UIUtils.unescape_csv_text(comment)
+                    else:
+                        comment = ""
+
+                    # 检查特殊指令
+                    cmd_type_str, param = UIUtils.parse_special_command(command)
+                    if not enable and cmd_type_str:
+                        if cmd_type_str == 'mode':
+                            current_module = param.strip()
+                            self.modules[current_module] = []
+                            self.module_combo.addItem(current_module)
+                            # 添加系统消息提示模块已创建
+                            self.output_manager.append_text(f"已创建模块: '{current_module}'", OutputSource.SYSTEM)
+                        # delay指令会在发送时处理
+
+                    # 添加命令到表格 (保持行号对应)
+                    send_btn = self.command_table.add_command_row(enable, command, comment, row)
+
+                    # 添加到当前模块 (非注释行和特殊指令行)
+                    if not (enable == False and command == "" and comment):  # 不是纯注释行
+                        self.modules[current_module].append(row)
+
+                    row += 1
 
             # 导入完成后, 确保所有按钮连接正确
             self.command_table.update_send_buttons_after_row(0)
@@ -1338,6 +1440,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def export_template(self):
         """导出模板"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.export_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.export_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.GREEN_BUTTON};
+                color: white;
+            }}
+        """))
+
         last_dir = self.config_manager.get_last_used_directory()
         filename, _ = QFileDialog.getSaveFileName(
             self, "导出模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
@@ -1349,13 +1466,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         try:
             with open(filename, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.writer(f)
+                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
                 # 写入注释头
                 writer.writerow(["// 选择框,串口需要发送的数据,注释"])
 
                 commands = self.command_table.get_all_commands()
                 for enable, command, comment in commands:
-                    # 转义不可见字符，避免破坏CSV格式
+                    # CSV writer会自动处理引号和特殊字符，无需手动转义
+                    # 只对不可见字符进行转义，保持可读性
                     escaped_command = UIUtils.escape_text(command)
                     escaped_comment = UIUtils.escape_text(comment)
                     writer.writerow([str(enable), escaped_command, escaped_comment])
@@ -1367,6 +1485,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def _jump_to_module_row(self):
         """跳转到所选模块的第一个命令行"""
+        # 添加视觉反馈 - 按钮闪烁效果
+        self.jump_to_module_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON};
+                color: white;
+            }}
+        """)
+        # 200ms后恢复原始样式
+        QTimer.singleShot(200, lambda: self.jump_to_module_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BLUE_BUTTON};
+                color: white;
+            }}
+        """))
+
         selected_module_name = self.module_combo.currentText()
 
         if selected_module_name == "全部":
@@ -1384,7 +1517,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 滚动到该行
         self.command_table.scrollToItem(self.command_table.item(first_command_row, 0))
-        
+
         # 选中该行
         self.command_table.selectRow(first_command_row)
         self.output_manager.append_text(f"已跳转到模块 '{selected_module_name}' 的第一个命令。", OutputSource.SYSTEM)

@@ -4,6 +4,208 @@
 
 ---
 
+## 版本 1.1.2 (2026-01-24)
+
+### 摘要
+
+```txt
+修复CSV处理问题并新增StopContinuous流程控制指令
+
+主要修复内容:
+1. 修复CSV导入导出双引号累积问题 - 使用标准csv.reader/writer，符合RFC 4180
+2. 修复CSV导入BOM字符识别失败 - 改用utf-8-sig编码自动处理BOM
+3. 新增StopContinuous特殊指令 - 支持提前结束本轮或完全停止
+4. 增强按钮可视化反馈 - 为配置、复位、保存、清空、导入、导出等按钮添加闪烁效果
+5. 优化多列注释支持 - CSV第3列及之后的所有内容自动合并为注释
+
+修改文件:
+- main_window.py
+- managers/special_command_manager.py
+- widgets/command_widgets.py
+- utils/ui_utils.py
+
+版本更新: 1.1.1 -> 1.1.2
+```
+
+### Bug 修复
+
+#### CSV 导入导出问题
+
+**问题1：双引号累积**
+- **现象**: 导出导入循环后，注释字段中的双引号不断累积
+- **根本原因**:
+  - 导出时：csv.writer 自动添加引号，同时手动转义导致双重转义
+  - 导入时：使用手动字符串分割 `split(',')` 无法正确处理 CSV 标准引号
+- **解决方案**:
+  - 导出：显式指定 `quoting=csv.QUOTE_MINIMAL`，让 Python csv 模块自动处理引号
+  - 导入：使用 `csv.reader()` 替代手动分割，自动处理 CSV 标准转义
+- **参考文档**: [BUG_FIX_CSV_QUOTE_ACCUMULATION.md](BUG_FIX_CSV_QUOTE_ACCUMULATION.md)
+
+**问题2：BOM 字符导致第一行无法识别**
+- **现象**: 部分 CSV 文件（如 RxCH1+RxCH2+TxCH1+TxCH2.csv）第一行无法识别
+- **根本原因**: 文件包含 UTF-8 BOM 字符 (0xEF 0xBB 0xBF)，导致第一列被解析为 "﻿False" 而非 "False"
+- **解决方案**: 将 `encoding='utf-8'` 改为 `encoding='utf-8-sig'`，自动移除 BOM
+- **位置**: [main_window.py:1353](../main_window.py#L1353)
+
+**问题3：多列注释解析**
+- **增强**: 现在支持第3列及之后的所有列都作为注释（用逗号连接）
+- **好处**: 用户可以在注释中使用任意数量的逗号，不会被当作列分隔符
+- **示例**:
+  ```csv
+  True,AT+CONFIG,配置参数,波特率9600,数据位8,校验位None
+  ```
+  注释将被正确解析为：`"配置参数,波特率9600,数据位8,校验位None"`
+
+#### StopContinuous 指令问题
+
+**问题1：StopContinuous 在普通连续发送中不生效**
+- **现象**: 执行 StopContinuous 指令后无系统消息，无法停止
+- **根本原因**: `send_continuous_commands()` 的 `send_next_command` 函数未处理 STOPCONTINUOUS 类型
+- **解决方案**: 在 [main_window.py:1173-1179](../main_window.py#L1173-L1179) 添加 StopContinuous 处理逻辑
+- **效果**: 现在 StopContinuous 在普通连续发送和 SendMode 中都能正常工作
+
+**问题2：StopContinuous:0 行为不正确**
+- **期望行为**: 提前结束本轮，但继续循环（等待循环间隔后自动开始下一轮）
+- **实际行为**: 完全停止了连续发送，不再继续循环
+- **根本原因**:
+  - 使用 `_force_no_loop` 标志但在闭包中被捕获，中途设置不生效
+  - 调用 `stop_continuous_send()` 导致完全停止
+- **解决方案**:
+  - 模式0：设置 `_skip_to_loop` 标志，不调用 `stop_continuous_send()`
+  - 在 `send_next_command` 开始时检查标志，立即跳转到循环检查
+  - 简化循环逻辑，移除 `_force_no_loop` 标志
+- **位置**:
+  - [managers/special_command_manager.py:95-128](../managers/special_command_manager.py#L95-L128)
+  - [main_window.py:1110-1124](../main_window.py#L1110-L1124)
+
+### 新增功能
+
+#### StopContinuous 特殊指令
+
+**功能**: 控制连续发送流程，可选择提前结束本轮或完全停止
+
+**格式**: `StopContinuous:参数`
+
+**参数说明**:
+- `0` 或 空 - 提前结束本轮，继续循环（默认）
+  - 停止执行当前轮的后续命令
+  - 保持循环发送勾选状态
+  - 等待循环间隔后，自动开始下一轮
+  - 适用场景：提前结束本轮测试，立即进入下一轮循环
+
+- `1` - 完全停止连续发送和循环发送
+  - 停止执行当前轮的后续命令
+  - 取消循环发送勾选
+  - 完全停止，不再继续
+  - 适用场景：完全停止所有自动发送功能
+
+**系统消息**:
+- 参数为 0: `"StopContinuous: 提前结束本轮发送，等待下一轮循环"`
+- 参数为 1: `"StopContinuous: 已停止连续发送和循环发送"`
+
+**应用场景**:
+```
+命令序列示例（勾选了"循环发送"）：
+第一轮:
+1. [✓] AT+TEST1              ← 执行
+2. [✓] AT+TEST2              ← 执行
+3. [✓] StopContinuous:0      ← 执行，提前结束本轮
+4. [✓] AT+TEST3              ← 不执行（已跳过）
+
+等待循环间隔...
+
+第二轮:
+1. [✓] AT+TEST1              ← 执行
+2. [✓] AT+TEST2              ← 执行
+3. [✓] StopContinuous:0      ← 执行，提前结束本轮
+4. [✓] AT+TEST3              ← 不执行（已跳过）
+
+...（继续循环）
+```
+
+**参考文档**: [ENHANCEMENT_STOP_COMMANDS.md](ENHANCEMENT_STOP_COMMANDS.md)
+
+#### 按钮可视化反馈增强
+
+**第一批（蓝色按钮）**:
+- ✅ 配置按钮 - 点击时闪烁红色 200ms
+- ✅ 跳转到此按钮 - 点击时闪烁红色 200ms
+- ✅ 复位按钮 - 点击时闪烁红色 200ms + 系统消息 "统计数据已复位"
+
+**第二批（绿色按钮）**:
+- ✅ 保存数据按钮 - 点击时闪烁红色 200ms
+- ✅ 清空数据按钮 - 点击时闪烁红色 200ms + 系统消息 "接收数据已清空"
+- ✅ 导入模板按钮 - 点击时闪烁红色 200ms
+- ✅ 导出模板按钮 - 点击时闪烁红色 200ms
+
+**参考文档**: [ENHANCEMENT_VISUAL_FEEDBACK.md](ENHANCEMENT_VISUAL_FEEDBACK.md)
+
+### 技术改进
+
+#### CSV 处理优化
+- **标准兼容**: 生成的 CSV 文件符合 RFC 4180 标准
+- **工具兼容**: 可被 Excel、LibreOffice 等标准 CSV 工具正确打开
+- **向后兼容**: 新代码可以正确读取旧格式的 CSV 文件
+- **多列支持**: 第3列及之后的所有内容自动合并为注释，支持注释中包含逗号
+
+#### 流程控制增强
+- **_skip_to_loop 标志**: 新增标志用于控制提前结束本轮但继续循环
+- **动态循环检查**: 在 `send_next_command` 开始时动态检查标志
+- **简化循环逻辑**: 移除 `_force_no_loop` 复杂逻辑，使用更直观的 `_skip_to_loop`
+
+### 测试验证
+
+#### CSV 测试
+提供了两个测试脚本验证修复：
+
+1. **test_csv_export_import.py** - 导出导入循环测试
+   - 测试包含各种特殊字符的注释（逗号、双引号、制表符、换行符）
+   - 进行3轮导出导入循环
+   - 验证数据完整性，确认双引号不再累积
+
+2. **test_multi_column_comment.py** - 多列注释测试
+   - 验证第3列及之后的所有内容都被合并为注释
+   - 测试手动创建的多列 CSV 文件
+   - 确认逗号不会被当作列分隔符
+
+**测试结果**: 所有测试通过 ✅
+
+### 修改的文件清单
+
+1. **main_window.py**
+   - `import_template()` - 改用 utf-8-sig 编码，使用 csv.reader
+   - `export_template()` - 显式指定 csv.QUOTE_MINIMAL
+   - `send_continuous_commands()` - 添加 StopContinuous 处理，优化循环逻辑
+   - `open_config_dialog()` - 添加配置按钮闪烁效果
+   - `reset_statistics()` - 添加复位按钮闪烁效果和系统消息
+   - `_jump_to_module_row()` - 添加跳转按钮闪烁效果
+   - `save_receive_data()` - 添加保存数据按钮闪烁效果
+   - `clear_receive_data()` - 添加清空数据按钮闪烁效果和系统消息
+
+2. **managers/special_command_manager.py**
+   - `_handle_stop_continuous()` - 重写逻辑，支持模式0和模式1
+   - `execute_sendmode_inline()` - 更新 StopContinuous 处理
+
+3. **widgets/command_widgets.py**
+   - `add_special_command()` - 添加 StopContinuous 参数配置对话框
+
+4. **utils/ui_utils.py**
+   - 移除 STOPLOOP 枚举（已合并到 STOPCONTINUOUS）
+
+### 兼容性说明
+
+- **向后兼容**: 所有修改都向后兼容，不影响现有功能
+- **CSV 兼容**: 新代码可以正确读取旧格式的 CSV 文件
+- **配置兼容**: 配置文件格式未改变，无需升级
+
+### 版本信息
+
+- 工具版本: 1.1.1 → 1.1.2
+- 配置版本: 1.1.1 → 1.1.2
+- 更新时间: 2026-01-24
+
+---
+
 ## 版本 1.1.1 (2026-01-23)
 
 ### 摘要

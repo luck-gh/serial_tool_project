@@ -11,7 +11,8 @@ class SpecialCommandManager:
             SpecialCommandType.SENDHEX: self._handle_sendhex,
             SpecialCommandType.BAUDRATE: self._handle_baudrate,
             SpecialCommandType.SETENDLOG: self._handle_setendlog,
-            SpecialCommandType.SENDMODE: self._handle_sendmode
+            SpecialCommandType.SENDMODE: self._handle_sendmode,
+            SpecialCommandType.STOPCONTINUOUS: self._handle_stop_continuous
         }
 
     def add_command(self, command_type, handler):
@@ -91,6 +92,41 @@ class SpecialCommandManager:
             return context.trigger_send_mode(param.strip())
         return False
 
+    def _handle_stop_continuous(self, param, context):
+        """处理StopContinuous指令 - 停止连续发送，可选择是否停止循环发送
+
+        参数:
+        - 0 或 空: 提前结束本轮发送，保持循环发送继续（默认）
+        - 1: 完全停止连续发送和循环发送
+        """
+        from utils.ui_utils import OutputSource
+
+        # 解析参数：0=提前结束本轮但继续循环，1=完全停止
+        mode = 0
+        if param and param.strip():
+            try:
+                mode = int(param.strip())
+            except ValueError:
+                pass
+
+        if mode == 0:
+            # 模式 0: 提前结束本轮，但继续循环发送
+            # 设置标志让 send_next_command 立即跳转到循环检查
+            context._skip_to_loop = True
+            if hasattr(context, 'output_manager'):
+                context.output_manager.append_text("StopContinuous: 提前结束本轮发送", OutputSource.SYSTEM)
+            return True
+        elif mode == 1:
+            # 模式 1: 完全停止连续发送和循环发送
+            if hasattr(context, 'stop_continuous_send'):
+                context.stop_continuous_send()
+                if hasattr(context, 'loop_send_check'):
+                    context.loop_send_check.setChecked(False)
+                if hasattr(context, 'output_manager'):
+                    context.output_manager.append_text("StopContinuous: 已停止连续发送和循环发送", OutputSource.SYSTEM)
+                return True
+        return False
+
     def execute_sendmode_inline(self, module_name, context, completion_callback=None):
         """内联执行 SendMode 指令 - 发送指定模块后返回继续当前模块
 
@@ -167,6 +203,13 @@ class SpecialCommandManager:
 
         # 发送命令（同步方式，使用延迟链）
         def send_module_command(index=0):
+            # 检查是否已停止连续发送
+            if hasattr(context, 'is_continuous_sending') and not context.is_continuous_sending:
+                # 已停止，调用完成回调并退出
+                if completion_callback:
+                    completion_callback()
+                return
+
             if index >= len(commands_to_send):
                 # 模块发送完成，调用完成回调
                 if completion_callback:
@@ -205,6 +248,14 @@ class SpecialCommandManager:
                         QTimer.singleShot(interval, lambda: send_module_command(index + 1))
 
                     self.execute_sendmode_inline(param.strip(), context, on_nested_sendmode_complete)
+                    return
+                elif command_type == SpecialCommandType.STOPCONTINUOUS:
+                    # 处理 StopContinuous 指令
+                    self.execute(command_type, param, context)
+                    # 如果是模式0（_skip_to_loop），则跳出 SendMode 但继续外层循环
+                    # 如果是模式1，会调用 stop_continuous_sending，完全停止
+                    if completion_callback:
+                        completion_callback()
                     return
                 # 其他特殊指令跳过
                 interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100

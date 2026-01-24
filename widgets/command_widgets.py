@@ -490,6 +490,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         sendmode_action.triggered.connect(lambda: self.add_special_command(row, "sendmode"))
         special_command_menu.addAction(sendmode_action)
 
+        stopcontinuous_action = QAction("StopContinuous (停止发送)", self)
+        stopcontinuous_action.triggered.connect(lambda: self.add_special_command(row, "stopcontinuous"))
+        special_command_menu.addAction(stopcontinuous_action)
+
         special_command_action.setMenu(special_command_menu)
         menu.addAction(special_command_action)
 
@@ -553,6 +557,23 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             if ok and module_name:
                 command_edit.setText(f"mode:{module_name}")
                 self._uncheck_row(row)
+
+                # 通过主窗口刷新模块列表并显示系统消息
+                # 查找主窗口实例
+                main_window = None
+                parent = self.parent()
+                while parent is not None:
+                    if hasattr(parent, 'refresh_modules') and hasattr(parent, 'output_manager'):
+                        main_window = parent
+                        break
+                    parent = parent.parent()
+
+                if main_window:
+                    # 刷新模块列表
+                    main_window.refresh_modules(silent=True)
+                    # 显示系统消息
+                    from utils.ui_utils import OutputSource
+                    main_window.output_manager.append_text(f"已创建模块: '{module_name}'", OutputSource.SYSTEM)
         elif command_type == "delay":
             initial_val = 100.0
             if cmd_type_str == "delay":
@@ -626,6 +647,22 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             module_name, ok = QInputDialog.getItem(self, "SendMode 设置", "请选择要跳转发送的模块:", options, initial_idx, True)
             if ok and module_name:
                 command_edit.setText(f"SendMode:{module_name}")
+                self._uncheck_row(row)
+        elif command_type == "stopcontinuous":
+            # StopContinuous 指令 - 可选参数 0 或 1
+            # 0 = 仅停止连续发送（默认）
+            # 1 = 同时停止连续发送和循环发送
+            options = ["0 - 仅停止连续发送", "1 - 同时停止连续和循环发送"]
+            initial_idx = 0
+            if cmd_type_str == "stopcontinuous":
+                val = param.strip()
+                if val == "1":
+                    initial_idx = 1
+
+            choice, ok = QInputDialog.getItem(self, "StopContinuous 设置", "请选择停止模式:", options, initial_idx, False)
+            if ok:
+                param_val = "0" if "0 -" in choice else "1"
+                command_edit.setText(f"StopContinuous:{param_val}")
                 self._uncheck_row(row)
 
     def _uncheck_row(self, row):

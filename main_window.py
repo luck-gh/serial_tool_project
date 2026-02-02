@@ -585,14 +585,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
         continuous_layout.addWidget(self.refresh_modules_btn)
 
-        # 创建模块标签并设置右对齐
-        module_label = QLabel("模块:")
-        module_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # 右对齐
-        continuous_layout.addWidget(module_label)
+        # 跳转到此 - 模块选择
+        jump_label = QLabel("跳转:")
+        jump_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        continuous_layout.addWidget(jump_label)
 
-        self.module_combo = QComboBox()
-        self.module_combo.addItem("全部")
-        continuous_layout.addWidget(self.module_combo)
+        self.jump_module_combo = QComboBox()
+        self.jump_module_combo.addItem("全部")
+        continuous_layout.addWidget(self.jump_module_combo)
 
         # 新增的跳转到此按钮
         self.jump_to_module_btn = QPushButton("跳转到此")
@@ -603,6 +603,28 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             }}
         """)
         continuous_layout.addWidget(self.jump_to_module_btn)
+
+        # Mode Sync Button
+        self.sync_mode_btn = QPushButton("<-")
+        self.sync_mode_btn.setFixedWidth(30)
+        self.sync_mode_btn.setToolTip("将发送模式同步到跳转模式")
+        self.sync_mode_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BLUE_BUTTON};
+                color: white;
+                padding: 2px;
+            }}
+        """)
+        continuous_layout.addWidget(self.sync_mode_btn)
+
+        # 连续发送 - 模块选择
+        send_label = QLabel("发送:")
+        send_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        continuous_layout.addWidget(send_label)
+
+        self.send_module_combo = QComboBox()
+        self.send_module_combo.addItem("全部")
+        continuous_layout.addWidget(self.send_module_combo)
 
         self.continuous_btn = QPushButton("连续发送")
         self.continuous_btn.setStyleSheet(f"""
@@ -651,6 +673,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.refresh_modules_btn.clicked.connect(self.refresh_modules)
         self.config_btn.clicked.connect(self.open_config_dialog)
         self.jump_to_module_btn.clicked.connect(self._jump_to_module_row)
+        self.sync_mode_btn.clicked.connect(self._sync_mode_selection)
 
         # 连接工具按钮（动态连接，基于工具名映射到方法）
         tool_method_map = {
@@ -754,7 +777,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     color: white;
                 }}
             """)
-            self.output_manager.append_text("串口已打开", OutputSource.SYSTEM)
+            self.output_manager.append_text("串口已打开", OutputSource.SYSTEM) 
 
         except Exception as e:
             error_str = str(e)
@@ -972,11 +995,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def update_baudrate(self, baudrate):
         """更新波特率 (供特殊指令使用) """
         self.baud_combo.setCurrentText(str(baudrate))
-        if self.is_connected:
-            # 如果已连接，需要重新打开串口以应用新波特率
-            self.output_manager.append_text(f"正在切换波特率至: {baudrate}", OutputSource.SYSTEM)
-            self.close_serial()
-            QTimer.singleShot(100, self.open_serial)
+        if self.is_connected and self.serial_thread:
+            # 动态调整波特率，无需关闭串口
+            self.output_manager.append_text(f"正在调整波特率至: {baudrate}", OutputSource.SYSTEM)
+            if self.serial_thread.set_baudrate(baudrate):
+                self.output_manager.append_text(f"波特率已更新为: {baudrate}", OutputSource.SYSTEM)
+            else:
+                self.output_manager.append_text(f"调整波特率失败", OutputSource.ERROR)
 
     def set_ending(self, ending_text):
         """设置结尾标识符 (供特殊指令使用) """
@@ -1002,7 +1027,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.refresh_modules()
         
         if module_name in self.modules or module_name == "全部":
-            self.module_combo.setCurrentText(module_name)
+            self.jump_module_combo.setCurrentText(module_name)
             self.output_manager.append_text(f"触发模块跳转: {module_name} (仅发送一次)", OutputSource.SYSTEM)
             
             # 设置强制不循环标志
@@ -1045,7 +1070,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return
 
         # 获取当前选中的模块名称
-        selected_module = self.module_combo.currentText()
+        selected_module = self.send_module_combo.currentText()
 
         self.is_continuous_sending = True
         self.continuous_btn.setText("停止")
@@ -1083,7 +1108,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if not self.is_continuous_sending:
             return
 
-        selected_module = self.module_combo.currentText()
+        selected_module = self.send_module_combo.currentText()
 
         # 收集需要发送的命令
         commands_to_send = []
@@ -1234,11 +1259,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             """))
 
         # 保存当前选择
-        current_selection = self.module_combo.currentText() if self.module_combo.currentText() else "全部"
+        jump_selection = self.jump_module_combo.currentText() if self.jump_module_combo.currentText() else "全部"
+        send_selection = self.send_module_combo.currentText() if self.send_module_combo.currentText() else "全部"
 
         self.modules.clear()
-        self.module_combo.clear()
-        self.module_combo.addItem("全部")
+        self.jump_module_combo.clear()
+        self.send_module_combo.clear()
+        self.jump_module_combo.addItem("全部")
+        self.send_module_combo.addItem("全部")
 
         current_module = "默认"
         self.modules[current_module] = []
@@ -1246,19 +1274,41 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         for row in range(self.command_table.rowCount()):
             enable, command, comment = self.command_table.get_row_data(row)
 
-            # 检查是否为mode指令
+            # 检查是否为特殊指令
             cmd_type_str, param = UIUtils.parse_special_command(command)
-            if not enable and cmd_type_str == "mode":
+            
+            # 无论是否勾选，都要处理 mode/modeend 控制逻辑，以建立正确的模块结构
+            if cmd_type_str == "mode":
+                # mode指令：开始新模块
                 current_module = param.strip()
                 self.modules[current_module] = []
-                self.module_combo.addItem(current_module)
+                self.jump_module_combo.addItem(current_module)
+                self.send_module_combo.addItem(current_module)
+            elif cmd_type_str == "modeend":
+                # modeend指令：如果是勾选的，先加入当前模块（这样才能在运行时执行）
+                if enable:
+                    self.modules[current_module].append(row)
+                    
+                # 结束当前模块，切换回默认模块
+                # 注意：如果 param 是 '0' 才执行结束动作？不，定义时只要是 modeend 就结束定义范围
+                # 但运行时只有 param 不为 -1 (或特定值) 才结束？
+                # 这里我们保持定义结束的语义
+                if current_module != "默认":
+                    current_module = "默认"
+                    # 如果默认模块还未初始化，创建它
+                    if current_module not in self.modules:
+                        self.modules[current_module] = []
             else:
-                # 添加到当前模块
+                # 其他指令（普通指令或非结构化特殊指令）：只有所属的模块正确
+                # 但只有勾选的才会被 execute_xxx 用到？不，refresh_modules 只是建立映射
+                # 实际发送时会检查 enable
                 self.modules[current_module].append(row)
 
         # 恢复之前的选择(如果仍然存在)
-        if current_selection and self.module_combo.findText(current_selection) >= 0:
-            self.module_combo.setCurrentText(current_selection)
+        if jump_selection and self.jump_module_combo.findText(jump_selection) >= 0:
+            self.jump_module_combo.setCurrentText(jump_selection)
+        if send_selection and self.send_module_combo.findText(send_selection) >= 0:
+            self.send_module_combo.setCurrentText(send_selection)
 
         if not silent:
             self.output_manager.append_text("模块列表已刷新", OutputSource.SYSTEM)
@@ -1368,8 +1418,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 清空现有命令
             self.command_table.clear_all()
             self.modules.clear()
-            self.module_combo.clear()
-            self.module_combo.addItem("全部")
+            self.jump_module_combo.clear()
+            self.send_module_combo.clear()
+            self.jump_module_combo.addItem("全部")
+            self.send_module_combo.addItem("全部")
 
             current_module = "默认"
             self.modules[current_module] = []
@@ -1416,9 +1468,18 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         if cmd_type_str == 'mode':
                             current_module = param.strip()
                             self.modules[current_module] = []
-                            self.module_combo.addItem(current_module)
+                            self.jump_module_combo.addItem(current_module)
+                            self.send_module_combo.addItem(current_module)
                             # 添加系统消息提示模块已创建
                             self.output_manager.append_text(f"已创建模块: '{current_module}'", OutputSource.SYSTEM)
+                        elif cmd_type_str == 'modeend':
+                            # modeend指令：结束当前模块，切换回默认模块
+                            if current_module != "默认":
+                                current_module = "默认"
+                                # 如果默认模块还未初始化，创建它
+                                if current_module not in self.modules:
+                                    self.modules[current_module] = []
+                                self.output_manager.append_text(f"模块定义已结束，切换回默认模块", OutputSource.SYSTEM)
                         # delay指令会在发送时处理
 
                     # 添加命令到表格 (保持行号对应)
@@ -1500,7 +1561,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             }}
         """))
 
-        selected_module_name = self.module_combo.currentText()
+        selected_module_name = self.jump_module_combo.currentText()
 
         if selected_module_name == "全部":
             self.output_manager.append_text("提示: 请选择一个具体的模块进行跳转。", OutputSource.ERROR)
@@ -1546,7 +1607,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     "show_send": self.show_send_check.isChecked(),
                     "send_color": self.send_color_combo.currentText(),
                     "ending": self.ending_combo.currentText(),
-                    "selected_module": self.module_combo.currentText()
+                    "jump_module": self.jump_module_combo.currentText(),
+                    "send_module": self.send_module_combo.currentText()
                 }),
                 ("other_settings", {
                     "show_timestamp": self.timestamp_check.isChecked()
@@ -1627,17 +1689,78 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 for row, cmd_data in enumerate(saved_commands):
                     self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
                 self.refresh_modules()
-                
+
                 # 恢复选择的模块
-                selected_module = send_settings.get("selected_module")
-                if selected_module and self.module_combo.findText(selected_module) >= 0:
-                    self.module_combo.setCurrentText(selected_module)
+                jump_module = send_settings.get("jump_module")
+                send_module = send_settings.get("send_module")
+
+                # 兼容旧版本: 如果没有新的设置，尝试使用旧的 selected_module
+                if not jump_module and not send_module:
+                    old_module = send_settings.get("selected_module")
+                    if old_module:
+                        jump_module = old_module
+                        send_module = old_module
+
+                if jump_module and self.jump_module_combo.findText(jump_module) >= 0:
+                    self.jump_module_combo.setCurrentText(jump_module)
+                if send_module and self.send_module_combo.findText(send_module) >= 0:
+                    self.send_module_combo.setCurrentText(send_module)
             else:
                 self.add_initial_commands(10)
         except Exception as e:
             print(f"加载状态失败: {e}")
             if self.command_table.rowCount() == 0:
                 self.add_initial_commands(10)
+
+    def _sync_mode_selection(self):
+        """同步发送模式到跳转模式"""
+        current_send_mode = self.send_module_combo.currentText()
+        if current_send_mode:
+            index = self.jump_module_combo.findText(current_send_mode)
+            if index >= 0:
+                self.jump_module_combo.setCurrentIndex(index)
+                
+                # 添加视觉反馈
+                original_style = self.sync_mode_btn.styleSheet()
+                self.sync_mode_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {Colors.RED_BUTTON};
+                        color: white;
+                        padding: 2px;
+                    }}
+                """)
+                QTimer.singleShot(200, lambda: self.sync_mode_btn.setStyleSheet(original_style))
+
+    def set_ending(self, ending_type):
+        """设置结尾标识符
+        
+        Args:
+            ending_type (str): 结尾标识符类型，例如: "None", "\r\n", "\r", "\n"
+                               如果是转义后的字符串 (如 r"\r\n") 也会被尝试匹配
+        """
+        # 尝试在下拉框中找到对应的文本
+        index = self.ending_combo.findText(ending_type)
+        if index >= 0:
+            self.ending_combo.setCurrentIndex(index)
+            # 添加系统消息
+            self.output_manager.append_text(f"SetEndlog: 结尾标识符已设置为 '{ending_type}'", OutputSource.SYSTEM)
+        else:
+            # 尝试处理转义字符的匹配 (例如输入 literal 的 \r\n 匹配 r"\r\n")
+            # 这里简单做个反向查找
+            found = False
+            for i in range(self.ending_combo.count()):
+                item_text = self.ending_combo.itemText(i)
+                # 比较 item_text 和 ending_type 是否在此上下文中等价
+                # 简单比较: 
+                if item_text == ending_type or \
+                   item_text.replace(r"\r", "\r").replace(r"\n", "\n") == ending_type:
+                    self.ending_combo.setCurrentIndex(i)
+                    self.output_manager.append_text(f"SetEndlog: 结尾标识符已设置为 '{item_text}'", OutputSource.SYSTEM)
+                    found = True
+                    break
+            
+            if not found:
+                self.output_manager.append_text(f"SetEndlog 错误: 找不到标识符类型 '{ending_type}'", OutputSource.ERROR)
 
     def _load_legacy_state(self):
         """加载旧版本的平铺式配置 (用于平滑迁移) """
@@ -1670,8 +1793,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
                 self.refresh_modules()
                 selected_module = self.config_manager.get("selected_module")
-                if selected_module and self.module_combo.findText(selected_module) >= 0:
-                    self.module_combo.setCurrentText(selected_module)
+                if selected_module and self.jump_module_combo.findText(selected_module) >= 0:
+                    self.jump_module_combo.setCurrentText(selected_module)
             else:
                 self.add_initial_commands(10)
         except:

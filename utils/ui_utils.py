@@ -43,6 +43,7 @@ class OutputSource(Enum):
 class SpecialCommandType(Enum):
     """特殊指令类型"""
     MODE = "mode"           # 模块命名
+    MODEEND = "modeend"     # 结束模块定义
     DELAY = "delay"         # 延迟设置
     SENDHEX = "sendhex"     # 十六进制发送
     BAUDRATE = "baudrate"   # 波特率设置

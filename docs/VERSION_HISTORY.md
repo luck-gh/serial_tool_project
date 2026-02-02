@@ -4,6 +4,99 @@
 
 ---
 
+## 版本 1.1.3 (2026-02-02)
+
+### 摘要
+
+```txt
+优化特殊指令系统和用户交互体验
+
+主要更新内容:
+1. 优化 BaudRate 动态切换 - 无需关闭/重开串口，直接修改波特率属性
+2. 改进 BaudRate 对话框 - 使用可编辑下拉框，支持预设值和手动输入
+3. 改进 SetEndlog 对话框 - 下拉选项显示正确的转义字符(\r\n、\r、\n)
+4. 新增 modeend 指令 - 结束当前模块定义，支持连续发送时正确分隔模块
+5. 修复 BaudRate/SetEndlog 连续发送 - 修复在连续发送中被跳过的问题
+6. 优化按钮视觉反馈 - "<-"同步按钮点击时显示红色
+
+修改文件:
+- core/serial_thread.py
+- main_window.py
+- managers/special_command_manager.py
+- widgets/command_widgets.py
+
+版本更新: 1.1.2 -> 1.1.3
+```
+
+### 功能优化
+
+#### BaudRate 动态切换
+- **优化** 波特率切换机制
+  - 原有: 切换波特率时需关闭串口再重新打开
+  - 现在: 直接修改串口的 baudrate 属性，无需断开连接
+  - 优势: 连续发送过程中切换波特率不会中断发送流程
+  - 实现: `SerialThread.set_baudrate()` 方法
+
+#### 特殊指令对话框改进
+- **改进** BaudRate 对话框
+  - 原有: 只能手动输入数字
+  - 现在: 可编辑下拉框，提供常用波特率预设 (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
+  - 优势: 快速选择常用值，同时支持自定义输入
+
+- **改进** SetEndlog 对话框
+  - 原有: 选项显示为 `rn`、`r`、`n`
+  - 现在: 选项显示为 `\r\n`、`\r`、`\n`
+  - 优势: 更直观，符合转义字符的标准表示
+
+### 新增功能
+
+#### modeend 指令
+- **新增** modeend 结束模块定义指令
+  - 格式: `modeend:0` 或 `modeend:`
+  - 作用: 结束当前模块定义，后续命令归入"默认"模块
+  - 连续发送时: 遇到 modeend 会正确结束当前模块的执行
+  - 应用: 在复杂命令序列中明确分隔不同功能模块
+
+### Bug 修复
+
+#### 连续发送特殊指令修复
+- **修复** BaudRate 和 SetEndlog 在连续发送中被跳过
+  - 问题: `send_module_command` 循环只处理部分特殊指令类型
+  - 修复: 添加 BAUDRATE 和 SETENDLOG 的显式处理
+  - 效果: 所有特殊指令在连续发送中都能正常执行
+
+### UI 优化
+
+#### 按钮视觉反馈
+- **优化** `<-` 同步按钮点击反馈
+  - 原有: 点击时闪烁绿色
+  - 现在: 点击时闪烁红色
+  - 优势: 与其他蓝色按钮的点击反馈保持一致
+
+### 修改的文件清单
+
+1. **core/serial_thread.py**
+   - 新增 `set_baudrate()` 方法
+
+2. **main_window.py**
+   - `update_baudrate()` - 改用动态波特率切换
+   - `_sync_mode_selection()` - 按钮点击颜色改为红色
+
+3. **managers/special_command_manager.py**
+   - `_handle_mode_end()` - 实现停止逻辑
+   - `send_module_command()` - 添加 BAUDRATE/SETENDLOG 处理
+
+4. **widgets/command_widgets.py**
+   - `add_special_command()` - 改进 BaudRate 和 SetEndlog 对话框
+
+### 版本信息
+
+- 工具版本: 1.1.2 → 1.1.3
+- 配置版本: 1.1.2 → 1.1.3
+- 更新时间: 2026-02-02
+
+---
+
 ## 版本 1.1.2 (2026-01-24)
 
 ### 摘要

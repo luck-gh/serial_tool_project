@@ -57,6 +57,20 @@ class SerialThread(QThread):
                 return 0
         return 0
 
+    def set_baudrate(self, baudrate):
+        """动态设置波特率"""
+        self.baudrate = baudrate
+        if self.serial and self.serial.is_open:
+            try:
+                self.serial.baudrate = baudrate
+                # 清除输入缓冲区以避免波特率不匹配产生的垃圾数据
+                self.serial.reset_input_buffer()
+                return True
+            except Exception as e:
+                self.error_occurred.emit(f"设置波特率失败: {str(e)}")
+                return False
+        return False
+
     def stop(self):
         """停止线程"""
         self.is_running = False

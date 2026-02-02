@@ -470,6 +470,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         mode_action.triggered.connect(lambda: self.add_special_command(row, "mode"))
         special_command_menu.addAction(mode_action)
 
+        modeend_action = QAction("modeend (结束模块定义)", self)
+        modeend_action.triggered.connect(lambda: self.add_special_command(row, "modeend"))
+        special_command_menu.addAction(modeend_action)
+
         delay_action = QAction("delay (延迟设置)", self)
         delay_action.triggered.connect(lambda: self.add_special_command(row, "delay"))
         special_command_menu.addAction(delay_action)
@@ -574,6 +578,26 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                     # 显示系统消息
                     from utils.ui_utils import OutputSource
                     main_window.output_manager.append_text(f"已创建模块: '{module_name}'", OutputSource.SYSTEM)
+        elif command_type == "modeend":
+            # modeend 指令不需要参数，直接设置为 modeend:0
+            command_edit.setText("modeend:0")
+            self._uncheck_row(row)
+
+            # 通过主窗口刷新模块列表并显示系统消息
+            main_window = None
+            parent = self.parent()
+            while parent is not None:
+                if hasattr(parent, 'refresh_modules') and hasattr(parent, 'output_manager'):
+                    main_window = parent
+                    break
+                parent = parent.parent()
+
+            if main_window:
+                # 刷新模块列表
+                main_window.refresh_modules(silent=True)
+                # 显示系统消息
+                from utils.ui_utils import OutputSource
+                main_window.output_manager.append_text("已添加 modeend 指令: 结束当前模块定义", OutputSource.SYSTEM)
         elif command_type == "delay":
             initial_val = 100.0
             if cmd_type_str == "delay":
@@ -599,25 +623,38 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                 command_edit.setText(f"SendHex:{hex_data}")
                 self._uncheck_row(row)
         elif command_type == "baudrate":
-            initial_val = 115200
+            # 常用波特率列表
+            baudrate_options = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"]
+            initial_val = "115200"
             if cmd_type_str == "baudrate":
+                initial_val = param.strip()
+            
+            # 计算初始选中索引
+            initial_idx = 0
+            if initial_val in baudrate_options:
+                initial_idx = baudrate_options.index(initial_val)
+            
+            # 使用 getItem 并设置 editable=True 允许手动输入
+            baudrate, ok = QInputDialog.getItem(self, "BaudRate设置", "请选择或输入波特率:", baudrate_options, initial_idx, True)
+            if ok and baudrate:
+                # 验证输入是否为有效数字
                 try:
-                    initial_val = int(param.strip())
-                except:
-                    pass
-            # 使用 getInt 确保只能输入数字
-            baudrate, ok = QInputDialog.getInt(self, "BaudRate设置", "请输入波特率:", initial_val, 0, 10000000, 1)
-            if ok:
-                command_edit.setText(f"BaudRate:{baudrate}")
-                self._uncheck_row(row)
+                    baudrate_int = int(baudrate)
+                    if baudrate_int > 0:
+                        command_edit.setText(f"BaudRate:{baudrate_int}")
+                        self._uncheck_row(row)
+                except ValueError:
+                    pass  # 无效输入，不做任何操作
         elif command_type == "setendlog":
-            options = ["None", "rn", "r", "n"]
+            # 使用正确的转义字符表示
+            options = ["None", "\\r\\n", "\\r", "\\n"]
             initial_idx = 0
             if cmd_type_str == "setendlog":
-                val = param.strip().lower()
+                val = param.strip()
+                # 匹配转义字符
                 if val in options:
                     initial_idx = options.index(val)
-                elif val == "none":
+                elif val.lower() == "none":
                     initial_idx = 0
             # 使用 getItem 提供预选项
             ending, ok = QInputDialog.getItem(self, "SetEndlog设置", "请选择结尾标识符:", options, initial_idx, False)

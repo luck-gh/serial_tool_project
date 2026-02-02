@@ -7,6 +7,7 @@ class SpecialCommandManager:
         self.config_manager = config_manager
         self.commands = {
             SpecialCommandType.MODE: self._handle_mode,
+            SpecialCommandType.MODEEND: self._handle_mode_end,
             SpecialCommandType.DELAY: self._handle_delay,
             SpecialCommandType.SENDHEX: self._handle_sendhex,
             SpecialCommandType.BAUDRATE: self._handle_baudrate,
@@ -28,6 +29,25 @@ class SpecialCommandManager:
     def _handle_mode(self, param, context):
         """处理mode指令"""
         # mode指令在解析模板时处理, 这里只是占位
+        return True
+
+    def _handle_mode_end(self, param, context):
+        """处理modeend指令 - 结束当前模块定义
+        
+        runtime行为:
+        - 结束当前模块的执行 (跳出当前模块发送循环)
+        """
+        from utils.ui_utils import OutputSource
+
+        # 如果 param 为 "0" 或空，则结束当前模块执行
+        if not param or param.strip() == "0":
+            if hasattr(context, '_skip_to_loop'):
+                # 下划线属性直接赋值，main_window.py 中 send_next_command 会检查此属性
+                context._skip_to_loop = True
+            
+            if hasattr(context, 'output_manager'):
+                context.output_manager.append_text("ModeEnd: 结束当前模块执行", OutputSource.SYSTEM)
+        
         return True
 
     def _handle_delay(self, param, context):
@@ -87,10 +107,14 @@ class SpecialCommandManager:
         return False
 
     def _handle_sendmode(self, param, context):
-        """处理SendMode指令"""
-        if hasattr(context, 'trigger_send_mode'):
-            return context.trigger_send_mode(param.strip())
-        return False
+        """处理SendMode指令
+
+        当在连续发送过程中调用时，会内联发送指定模块的内容
+        当单独点击发送按钮时，只发送指定模块的内容（不启动连续发送）
+        """
+        # 使用 execute_sendmode_inline 来发送指定模块
+        # 这样无论是在连续发送中还是单独点击，行为都是一致的
+        return self.execute_sendmode_inline(param.strip(), context, completion_callback=None)
 
     def _handle_stop_continuous(self, param, context):
         """处理StopContinuous指令 - 停止连续发送，可选择是否停止循环发送
@@ -142,6 +166,17 @@ class SpecialCommandManager:
         from utils.ui_utils import UIUtils, OutputSource
 
         module_name = module_name.strip()
+
+        # 判断当前是否为手动单次发送模式 (非连续发送状态)
+        is_manual_mode = not getattr(context, 'is_continuous_sending', False)
+
+        # 检查串口是否已连接
+        if not hasattr(context, 'is_connected') or not context.is_connected:
+            if hasattr(context, 'output_manager'):
+                context.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
+            if completion_callback:
+                completion_callback()
+            return False
 
         # 刷新模块列表以确保最新
         if hasattr(context, 'refresh_modules'):
@@ -203,8 +238,8 @@ class SpecialCommandManager:
 
         # 发送命令（同步方式，使用延迟链）
         def send_module_command(index=0):
-            # 检查是否已停止连续发送
-            if hasattr(context, 'is_continuous_sending') and not context.is_continuous_sending:
+            # 检查是否已停止连续发送 (仅在连续发送模式下才检查此标志)
+            if not is_manual_mode and hasattr(context, 'is_continuous_sending') and not context.is_continuous_sending:
                 # 已停止，调用完成回调并退出
                 if completion_callback:
                     completion_callback()
@@ -256,6 +291,18 @@ class SpecialCommandManager:
                     # 如果是模式1，会调用 stop_continuous_sending，完全停止
                     if completion_callback:
                         completion_callback()
+                    return
+                elif command_type == SpecialCommandType.BAUDRATE:
+                    # 处理 BaudRate 指令
+                    self.execute(command_type, param, context)
+                    interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                    QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+                    return
+                elif command_type == SpecialCommandType.SETENDLOG:
+                    # 处理 SetEndlog 指令
+                    self.execute(command_type, param, context)
+                    interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                    QTimer.singleShot(interval, lambda: send_module_command(index + 1))
                     return
                 # 其他特殊指令跳过
                 interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100

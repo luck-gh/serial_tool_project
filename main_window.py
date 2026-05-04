@@ -2,6 +2,7 @@ import sys
 import os
 import csv
 import re
+import tempfile
 from collections import OrderedDict
 
 import serial
@@ -11,7 +12,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView,
                              QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QFrame,
                              QMessageBox, QFileDialog, QDialog, QDialogButtonBox, QTextEdit,
-                             QSplitter, QMenu, QAction, QSizePolicy, QStyleFactory, QInputDialog)
+                             QSplitter, QMenu, QAction, QSizePolicy, QStyleFactory, QInputDialog,
+                             QProgressDialog)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette
 
@@ -74,10 +76,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.command_table.add_command_row(False, "", f"", row)
 
     def eventFilter(self, obj, event):
-        """滚轮事件过滤器, 完全防止滚轮改变下拉框值"""
-        if event.type() == QEvent.Wheel and isinstance(obj, QComboBox):
-            # 完全忽略所有QComboBox的滚轮事件
-            return True
+        """滚轮事件过滤器, 防止指定控件被滚轮误改"""
+        if event.type() == QEvent.Wheel:
+            if isinstance(obj, QComboBox):
+                return True
+            if obj in (self.interval_spin, self.loop_interval_spin):
+                return True
         return False
 
     def init_ui(self):
@@ -250,9 +254,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             button.setEnabled(is_enabled)
 
             if is_enabled:
-                button.setStyleSheet(f"QPushButton {{ background-color: {Colors.BLUE_BUTTON}; color: white; }}")
+                self._apply_button_color(button, Colors.BLUE_BUTTON)
             else:
-                button.setStyleSheet("QPushButton {{ background-color: #cccccc; color: #888888; }}")
+                button.setStyleSheet("QPushButton { background-color: #cccccc; color: #888888; }")
 
     def create_left_panel(self):
         """创建左侧设置面板 (可滚动) """
@@ -278,12 +282,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         # 添加刷新按钮
         self.refresh_ports_btn = QPushButton("刷新")
         self.refresh_ports_btn.setFixedWidth(60)
-        self.refresh_ports_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.refresh_ports_btn, Colors.GREEN_BUTTON)
 
         # 下拉菜单的最小宽度
         minimumWidth = 200
@@ -385,20 +384,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         receive_layout.addLayout(source_checkboxes_layout)
 
         self.save_btn = QPushButton("保存数据")
-        self.save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.save_btn, Colors.GREEN_BUTTON)
 
         self.clear_receive_btn = QPushButton("清空数据")
-        self.clear_receive_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.clear_receive_btn, Colors.GREEN_BUTTON)
 
         receive_layout.addWidget(self.save_btn)
         receive_layout.addWidget(self.clear_receive_btn)
@@ -437,6 +426,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(10, 10000)
         self.interval_spin.setValue(100)
+        self.interval_spin.installEventFilter(self)
         interval_layout.addWidget(self.interval_spin)
         send_layout.addLayout(interval_layout)
 
@@ -450,6 +440,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.loop_interval_spin = QSpinBox()
         self.loop_interval_spin.setRange(10, 60000)
         self.loop_interval_spin.setValue(1000)
+        self.loop_interval_spin.installEventFilter(self)
         loop_layout.addWidget(self.loop_interval_spin)
         send_layout.addLayout(loop_layout)
 
@@ -473,20 +464,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         template_buttons_layout = QHBoxLayout()
         self.import_btn = QPushButton("导入模板")
-        self.import_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
 
         self.export_btn = QPushButton("导出模板")
-        self.export_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
 
         template_buttons_layout.addWidget(self.import_btn)
         template_buttons_layout.addWidget(self.export_btn)
@@ -512,12 +493,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 配置按钮
         self.config_btn = QPushButton("配置")
-        self.config_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.config_btn, Colors.BLUE_BUTTON)
         layout.addWidget(self.config_btn)
 
         return scroll_area
@@ -556,12 +532,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 追加命令按钮
         self.add_command_btn = QPushButton("追加命令")
-        self.add_command_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.add_command_btn, Colors.GREEN_BUTTON)
         send_layout.addWidget(self.add_command_btn)
 
         # 将两个组添加到分割器
@@ -577,12 +548,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         continuous_layout = QHBoxLayout(continuous_group)
 
         self.refresh_modules_btn = QPushButton("刷新")
-        self.refresh_modules_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.refresh_modules_btn, Colors.GREEN_BUTTON)
         continuous_layout.addWidget(self.refresh_modules_btn)
 
         # 跳转到此 - 模块选择
@@ -590,31 +556,37 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         jump_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         continuous_layout.addWidget(jump_label)
 
+        self.jump_row_input = QLineEdit()
+        self.jump_row_input.setPlaceholderText("行号")
+        self.jump_row_input.setMaximumWidth(60)
+        continuous_layout.addWidget(self.jump_row_input)
+
+        self.jump_row_btn = QPushButton("跳行")
+        self._bind_momentary_button_feedback(self.jump_row_btn, Colors.GREEN_BUTTON)
+        continuous_layout.addWidget(self.jump_row_btn)
+
         self.jump_module_combo = QComboBox()
         self.jump_module_combo.addItem("全部")
-        continuous_layout.addWidget(self.jump_module_combo)
+        self.jump_module_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        continuous_layout.addWidget(self.jump_module_combo, 1)
+
+        # Mode Sync Button - 将跳转模块同步到发送模块
+        self.sync_mode_forward_btn = QPushButton("->")
+        self.sync_mode_forward_btn.setFixedWidth(30)
+        self.sync_mode_forward_btn.setToolTip("将跳转模式同步到发送模式")
+        self._bind_momentary_button_feedback(self.sync_mode_forward_btn, Colors.BLUE_BUTTON, extra_styles="padding: 2px;")
+        continuous_layout.addWidget(self.sync_mode_forward_btn)
 
         # 新增的跳转到此按钮
         self.jump_to_module_btn = QPushButton("跳转到此")
-        self.jump_to_module_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.jump_to_module_btn, Colors.BLUE_BUTTON)
         continuous_layout.addWidget(self.jump_to_module_btn)
 
-        # Mode Sync Button
+        # Mode Sync Button - 将发送模块同步到跳转模块
         self.sync_mode_btn = QPushButton("<-")
         self.sync_mode_btn.setFixedWidth(30)
         self.sync_mode_btn.setToolTip("将发送模式同步到跳转模式")
-        self.sync_mode_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-                padding: 2px;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.sync_mode_btn, Colors.BLUE_BUTTON, extra_styles="padding: 2px;")
         continuous_layout.addWidget(self.sync_mode_btn)
 
         # 连续发送 - 模块选择
@@ -624,15 +596,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         self.send_module_combo = QComboBox()
         self.send_module_combo.addItem("全部")
-        continuous_layout.addWidget(self.send_module_combo)
+        self.send_module_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        continuous_layout.addWidget(self.send_module_combo, 1)
 
         self.continuous_btn = QPushButton("连续发送")
-        self.continuous_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._set_action_button_running(self.continuous_btn, False, Colors.GREEN_BUTTON)
         continuous_layout.addWidget(self.continuous_btn)
 
         layout.addWidget(continuous_group)
@@ -643,12 +611,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.send_count_label = QLabel("发送: 0 字节")
         self.receive_count_label = QLabel("接收: 0 字节")
         self.reset_stats_btn = QPushButton("复位")
-        self.reset_stats_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-            }}
-        """)
+        self._bind_momentary_button_feedback(self.reset_stats_btn, Colors.BLUE_BUTTON)
 
         stats_layout.addWidget(self.send_count_label)
         stats_layout.addWidget(self.receive_count_label)
@@ -673,6 +636,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.refresh_modules_btn.clicked.connect(self.refresh_modules)
         self.config_btn.clicked.connect(self.open_config_dialog)
         self.jump_to_module_btn.clicked.connect(self._jump_to_module_row)
+        self.jump_row_btn.clicked.connect(self._jump_to_row)
+        self.sync_mode_forward_btn.clicked.connect(self._sync_mode_forward_selection)
         self.sync_mode_btn.clicked.connect(self._sync_mode_selection)
 
         # 连接工具按钮（动态连接，基于工具名映射到方法）
@@ -688,38 +653,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 button.clicked.connect(lambda _, btn=button, m=method: self._tool_button_clicked(btn, m))
 
     def _tool_button_clicked(self, button, method):
-        """工具按钮点击处理 - 添加视觉反馈"""
-        # 添加视觉反馈 - 按钮闪烁和颜色变化
-        original_style = button.styleSheet()
-        button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: button.setStyleSheet(original_style))
-
-        # 调用实际的工具方法
+        """工具按钮点击处理"""
+        self._apply_button_color(button, Colors.RED_BUTTON)
         method()
+        if button.isEnabled():
+            self._apply_button_color(button, Colors.BLUE_BUTTON)
 
     def refresh_ports(self):
         """刷新可用串口列表"""
-        # 添加视觉反馈 - 按钮闪烁和颜色变化
-        self.refresh_ports_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.refresh_ports_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """))
-
         current_text = self.port_combo.currentText()
         self.port_combo.clear()
 
@@ -839,21 +780,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def open_config_dialog(self):
         """打开配置对话框"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.config_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.config_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-            }}
-        """))
-
         dialog = ConfigDialog(self.config_manager, self)
         if dialog.exec_():
             # 配置已保存，可以执行一些刷新操作
@@ -933,21 +859,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def add_command(self):
         """添加新命令"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.add_command_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.add_command_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """))
-
         row = self.command_table.rowCount()
         # 直接添加行, add_command_row内部已经处理了按钮连接, 不需要再次连接
         self.command_table.add_command_row(False, "", "", row)
@@ -1073,7 +984,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         selected_module = self.send_module_combo.currentText()
 
         self.is_continuous_sending = True
-        self.continuous_btn.setText("停止")
+        self.continuous_btn.setText("停止发送")
         self.continuous_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.RED_BUTTON};
@@ -1241,23 +1152,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def refresh_modules(self, silent=False):
         """刷新模块列表"""
-        # 添加视觉反馈 - 按钮闪烁和颜色变化
-        if not silent:
-            # 闪烁效果：改变按钮样式为运行中状态
-            self.refresh_modules_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {Colors.RED_BUTTON};
-                    color: white;
-                }}
-            """)
-            # 200ms后恢复原始样式
-            QTimer.singleShot(200, lambda: self.refresh_modules_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {Colors.GREEN_BUTTON};
-                    color: white;
-                }}
-            """))
-
         # 保存当前选择
         jump_selection = self.jump_module_combo.currentText() if self.jump_module_combo.currentText() else "全部"
         send_selection = self.send_module_combo.currentText() if self.send_module_combo.currentText() else "全部"
@@ -1315,21 +1209,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def save_receive_data(self):
         """保存接收数据"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """))
-
         filename, _ = QFileDialog.getSaveFileName(
             self, "保存接收数据", "", "Text Files (*.txt);;All Files (*)")
 
@@ -1343,21 +1222,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def clear_receive_data(self):
         """清空接收数据"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.clear_receive_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.clear_receive_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """))
-
         self.output_manager.clear()
         self.output_manager.append_text("接收数据已清空", OutputSource.SYSTEM)
 
@@ -1368,53 +1232,123 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def reset_statistics(self):
         """复位统计"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.reset_stats_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.reset_stats_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-            }}
-        """))
-
         self.send_count = 0
         self.receive_count = 0
         self.update_statistics()
         self.output_manager.append_text("统计数据已复位", OutputSource.SYSTEM)
 
-    def import_template(self):
-        """导入模板"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.import_btn.setStyleSheet(f"""
+    def _create_progress_dialog(self, title, maximum):
+        """创建可取消的进度弹窗"""
+        progress = QProgressDialog(title, "取消", 0, maximum, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.setValue(0)
+        return progress
+
+    def _count_importable_rows(self, filename):
+        """统计可导入的数据行数"""
+        count = 0
+        with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
+            reader = csv.reader(f)
+            for csv_row in reader:
+                if not csv_row or len(csv_row) == 0:
+                    continue
+                if csv_row[0].strip().startswith('//') or csv_row[0].strip().startswith('#'):
+                    continue
+                if len(csv_row) < 2:
+                    continue
+                enable_str = csv_row[0].strip().lower()
+                if enable_str not in ['true', 'false']:
+                    continue
+                count += 1
+        return count
+
+    def _snapshot_template_state(self):
+        """保存导入前模板状态，用于取消时回滚"""
+        return {
+            "commands": self.command_table.get_all_commands(),
+            "jump_module": self.jump_module_combo.currentText(),
+            "send_module": self.send_module_combo.currentText(),
+        }
+
+    def _restore_template_state(self, snapshot):
+        """恢复模板状态"""
+        self.command_table.clear_all()
+        for row, (enable, command, comment) in enumerate(snapshot["commands"]):
+            self.command_table.add_command_row(enable, command, comment, row)
+        self.command_table.update_send_buttons_after_row(0)
+        self.refresh_modules(silent=True)
+
+        jump_module = snapshot.get("jump_module")
+        send_module = snapshot.get("send_module")
+        if jump_module and self.jump_module_combo.findText(jump_module) >= 0:
+            self.jump_module_combo.setCurrentText(jump_module)
+        if send_module and self.send_module_combo.findText(send_module) >= 0:
+            self.send_module_combo.setCurrentText(send_module)
+
+    def _set_long_task_ui_busy(self, busy):
+        """长任务期间禁用主界面交互，避免可重入操作"""
+        central_widget = self.centralWidget()
+        if central_widget:
+            central_widget.setEnabled(not busy)
+
+    def _apply_button_color(self, button, color, extra_styles=""):
+        """应用按钮颜色样式"""
+        extra = f"\n                {extra_styles}" if extra_styles else ""
+        button.setStyleSheet(f"""
             QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
+                background-color: {color};
+                color: white;{extra}
             }}
         """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.import_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """))
+
+    def _bind_momentary_button_feedback(self, button, normal_color, pressed_color=Colors.RED_BUTTON, extra_styles=""):
+        """为瞬时按钮绑定按下变色、释放恢复"""
+        self._apply_button_color(button, normal_color, extra_styles)
+        button.pressed.connect(lambda b=button, c=pressed_color, s=extra_styles: self._apply_button_color(b, c, s))
+        button.released.connect(lambda b=button, c=normal_color, s=extra_styles: self._apply_button_color(b, c, s))
+
+    def _set_action_button_running(self, button, running, normal_color, running_color=Colors.RED_BUTTON, extra_styles=""):
+        """设置执行型按钮运行态颜色"""
+        target_color = running_color if running else normal_color
+        self._apply_button_color(button, target_color, extra_styles)
+
+    def _safe_remove_file(self, file_path):
+        """安全删除文件，不让清理异常覆盖主异常"""
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+    def _process_progress(self, progress, value):
+        """更新进度并处理取消事件"""
+        progress.setValue(value)
+        QApplication.processEvents()
+        return progress.wasCanceled()
+
+    def import_template(self):
+        """导入模板"""
+        self._set_action_button_running(self.import_btn, True, Colors.GREEN_BUTTON)
 
         last_dir = self.config_manager.get_last_used_directory()
         filename, _ = QFileDialog.getOpenFileName(
             self, "导入模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
 
         if not filename:
+            self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
             return
 
         self.config_manager.set_last_used_directory(os.path.dirname(filename))
 
         try:
+            total_rows = self._count_importable_rows(filename)
+            progress = self._create_progress_dialog("正在导入模板...", total_rows)
+            snapshot = self._snapshot_template_state()
+            self._set_long_task_ui_busy(True)
+
             # 清空现有命令
             self.command_table.clear_all()
             self.modules.clear()
@@ -1427,6 +1361,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.modules[current_module] = []
 
             row = 0
+            processed = 0
             with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
                 reader = csv.reader(f)
                 for csv_row in reader:
@@ -1479,88 +1414,89 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                                 # 如果默认模块还未初始化，创建它
                                 if current_module not in self.modules:
                                     self.modules[current_module] = []
-                                self.output_manager.append_text(f"模块定义已结束，切换回默认模块", OutputSource.SYSTEM)
+                                self.output_manager.append_text("模块定义已结束，切换回默认模块", OutputSource.SYSTEM)
                         # delay指令会在发送时处理
 
                     # 添加命令到表格 (保持行号对应)
-                    send_btn = self.command_table.add_command_row(enable, command, comment, row)
+                    self.command_table.add_command_row(enable, command, comment, row)
 
                     # 添加到当前模块 (非注释行和特殊指令行)
-                    if not (enable == False and command == "" and comment):  # 不是纯注释行
+                    if not (enable is False and command == "" and comment):
                         self.modules[current_module].append(row)
 
                     row += 1
+                    processed += 1
+                    if self._process_progress(progress, processed):
+                        self._restore_template_state(snapshot)
+                        self.output_manager.append_text("导入已取消", OutputSource.SYSTEM)
+                        return
 
             # 导入完成后, 确保所有按钮连接正确
             self.command_table.update_send_buttons_after_row(0)
-
+            progress.setValue(total_rows)
             self.output_manager.append_text(f"模板已导入: {filename}", OutputSource.SYSTEM)
 
         except Exception as e:
             self.output_manager.append_text(f"错误: 导入模板失败: {str(e)}", OutputSource.ERROR)
+        finally:
+            self._set_long_task_ui_busy(False)
+            self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
 
     def export_template(self):
         """导出模板"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.export_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.export_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """))
+        self._set_action_button_running(self.export_btn, True, Colors.GREEN_BUTTON)
 
         last_dir = self.config_manager.get_last_used_directory()
         filename, _ = QFileDialog.getSaveFileName(
             self, "导出模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
 
         if not filename:
+            self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
             return
 
         self.config_manager.set_last_used_directory(os.path.dirname(filename))
 
+        temp_path = None
         try:
-            with open(filename, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-                # 写入注释头
+            commands = self.command_table.get_all_commands()
+            progress = self._create_progress_dialog("正在导出模板...", len(commands))
+            self._set_long_task_ui_busy(True)
+
+            with tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', newline='', delete=False,
+                dir=os.path.dirname(filename) or None,
+                suffix='.tmp'
+            ) as temp_file:
+                temp_path = temp_file.name
+                writer = csv.writer(temp_file, quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(["// 选择框,串口需要发送的数据,注释"])
 
-                commands = self.command_table.get_all_commands()
-                for enable, command, comment in commands:
+                for index, (enable, command, comment) in enumerate(commands, start=1):
                     # CSV writer会自动处理引号和特殊字符，无需手动转义
                     # 只对不可见字符进行转义，保持可读性
                     escaped_command = UIUtils.escape_text(command)
                     escaped_comment = UIUtils.escape_text(comment)
                     writer.writerow([str(enable), escaped_command, escaped_comment])
 
+                    if self._process_progress(progress, index):
+                        temp_file.close()
+                        self._safe_remove_file(temp_path)
+                        self.output_manager.append_text("导出已取消", OutputSource.SYSTEM)
+                        return
+
+            os.replace(temp_path, filename)
+            progress.setValue(len(commands))
             self.output_manager.append_text(f"模板已导出: {filename}", OutputSource.SYSTEM)
 
         except Exception as e:
+            self._safe_remove_file(temp_path)
             self.output_manager.append_text(f"错误: 导出模板失败: {str(e)}", OutputSource.ERROR)
+        finally:
+            self._set_long_task_ui_busy(False)
+            self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
 
     def _jump_to_module_row(self):
         """跳转到所选模块的第一个命令行"""
-        # 添加视觉反馈 - 按钮闪烁效果
-        self.jump_to_module_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
-        # 200ms后恢复原始样式
-        QTimer.singleShot(200, lambda: self.jump_to_module_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-            }}
-        """))
-
         selected_module_name = self.jump_module_combo.currentText()
 
         if selected_module_name == "全部":
@@ -1577,11 +1513,35 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         first_command_row = module_rows[0]
 
         # 滚动到该行
-        self.command_table.scrollToItem(self.command_table.item(first_command_row, 0))
+        self.command_table.setCurrentCell(first_command_row, 0)
+        self.command_table.scrollTo(self.command_table.model().index(first_command_row, 0))
 
         # 选中该行
         self.command_table.selectRow(first_command_row)
         self.output_manager.append_text(f"已跳转到模块 '{selected_module_name}' 的第一个命令。", OutputSource.SYSTEM)
+
+    def _jump_to_row(self):
+        """跳转到指定行号"""
+        text = self.jump_row_input.text().strip()
+        if not text:
+            self.output_manager.append_text("请输入行号。", OutputSource.ERROR)
+            return
+
+        try:
+            target_row = int(text) - 1  # 转换为 0-based
+        except ValueError:
+            self.output_manager.append_text("行号必须是整数。", OutputSource.ERROR)
+            return
+
+        total_rows = self.command_table.rowCount()
+        if target_row < 0 or target_row >= total_rows:
+            self.output_manager.append_text(f"行号超出范围，当前共有 {total_rows} 行。", OutputSource.ERROR)
+            return
+
+        self.command_table.setCurrentCell(target_row, 0)
+        self.command_table.scrollTo(self.command_table.model().index(target_row, 0))
+        self.command_table.selectRow(target_row)
+        self.output_manager.append_text(f"已跳转到第 {target_row + 1} 行。", OutputSource.SYSTEM)
 
     def save_state(self):
         """保存当前状态到配置文件"""
@@ -1712,6 +1672,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             if self.command_table.rowCount() == 0:
                 self.add_initial_commands(10)
 
+    def _sync_mode_forward_selection(self):
+        """同步跳转模式到发送模式"""
+        current_jump_mode = self.jump_module_combo.currentText()
+        if current_jump_mode:
+            index = self.send_module_combo.findText(current_jump_mode)
+            if index >= 0:
+                self.send_module_combo.setCurrentIndex(index)
+
     def _sync_mode_selection(self):
         """同步发送模式到跳转模式"""
         current_send_mode = self.send_module_combo.currentText()
@@ -1719,17 +1687,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             index = self.jump_module_combo.findText(current_send_mode)
             if index >= 0:
                 self.jump_module_combo.setCurrentIndex(index)
-                
-                # 添加视觉反馈
-                original_style = self.sync_mode_btn.styleSheet()
-                self.sync_mode_btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {Colors.RED_BUTTON};
-                        color: white;
-                        padding: 2px;
-                    }}
-                """)
-                QTimer.singleShot(200, lambda: self.sync_mode_btn.setStyleSheet(original_style))
 
     def set_ending(self, ending_type):
         """设置结尾标识符

@@ -4,8 +4,8 @@ from PyQt5.QtWidgets import (QApplication, QStyleFactory)
 from main_window import SerialTool
 import datetime
 
-TOOL_VERSION = "1.1.3"
-TOOL_VERSION_DATE = datetime.datetime(2025, 12, 2, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
+TOOL_VERSION = "1.1.4"
+TOOL_VERSION_DATE = datetime.datetime(2026, 5, 4, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
 
 def main():
     """应用程序主入口"""

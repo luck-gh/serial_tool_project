@@ -29,6 +29,12 @@ from widgets.base_widgets import BaseWidgetMixin
 
 class SerialTool(QMainWindow, BaseWidgetMixin):
     """串口调试工具主窗口"""
+    LEFT_PANEL_MAX_WIDTH = 340
+    LEFT_BASIC_COMBO_WIDTH = 170
+    LEFT_CONTROL_MAX_WIDTH = 300
+    LEFT_COMPACT_CONTROL_WIDTH = 60
+    SYNC_BUTTON_WIDTH = 30
+
     def __init__(self, tool_version="0.0.0", tool_version_date="N/A", exe_name="main"):
         super().__init__()
         self.tool_version = tool_version
@@ -219,7 +225,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 左侧设置面板
         self.left_panel = self.create_left_panel()
-        self.left_panel.setMaximumWidth(400)  # 设置最大宽度为500像素
+        self.left_panel.setMaximumWidth(self.LEFT_PANEL_MAX_WIDTH)
         self.h_splitter.addWidget(self.left_panel)
 
         # 右侧数据交互面板
@@ -281,11 +287,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 添加刷新按钮
         self.refresh_ports_btn = QPushButton("刷新")
-        self.refresh_ports_btn.setFixedWidth(60)
+        self.refresh_ports_btn.setFixedWidth(self.LEFT_COMPACT_CONTROL_WIDTH)
         self._bind_momentary_button_feedback(self.refresh_ports_btn, Colors.GREEN_BUTTON)
 
         # 下拉菜单的最小宽度
-        minimumWidth = 200
+        basic_combo_width = self.LEFT_BASIC_COMBO_WIDTH
+        left_control_max_width = self.LEFT_CONTROL_MAX_WIDTH
         # 端口选择
         port_layout = QHBoxLayout()
         port_layout.addWidget(QLabel("端口:"))
@@ -293,7 +300,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.port_combo.setEditable(True)
         self.port_combo.popupAboutToBeShown.connect(self.refresh_ports)
         self.port_combo.installEventFilter(self)            # 禁用滚轮
-        self.port_combo.setFixedWidth(minimumWidth)         # 设置固定宽度
+        self.port_combo.setFixedWidth(basic_combo_width)     # 设置固定宽度
         port_layout.addWidget(self.refresh_ports_btn)
         port_layout.addWidget(self.port_combo)
         basic_layout.addLayout(port_layout)
@@ -306,7 +313,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.baud_combo.addItems(["9600", "115200", "57600", "38400", "19200", "4800"])
         self.baud_combo.setCurrentText("115200")
         self.baud_combo.installEventFilter(self)            # 禁用滚轮
-        self.baud_combo.setFixedWidth(minimumWidth)         # 设置固定宽度
+        self.baud_combo.setFixedWidth(basic_combo_width)     # 设置固定宽度
         baud_layout.addWidget(self.baud_combo)
         basic_layout.addLayout(baud_layout)
 
@@ -317,7 +324,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.data_bits_combo.addItems(["5", "6", "7", "8"])
         self.data_bits_combo.setCurrentText("8")
         self.data_bits_combo.installEventFilter(self)       # 禁用滚轮
-        self.data_bits_combo.setFixedWidth(minimumWidth)    # 设置固定宽度
+        self.data_bits_combo.setFixedWidth(basic_combo_width) # 设置固定宽度
         data_bits_layout.addWidget(self.data_bits_combo)
         basic_layout.addLayout(data_bits_layout)
 
@@ -328,7 +335,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.parity_combo.addItems(["None", "Even", "Odd", "Mark"])
         self.parity_combo.setCurrentText("None")
         self.parity_combo.installEventFilter(self)          # 禁用滚轮
-        self.parity_combo.setFixedWidth(minimumWidth)       # 设置固定宽度
+        self.parity_combo.setFixedWidth(basic_combo_width)   # 设置固定宽度
         parity_layout.addWidget(self.parity_combo)
         basic_layout.addLayout(parity_layout)
 
@@ -339,12 +346,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.stop_bits_combo.addItems(["1", "1.5", "2"])
         self.stop_bits_combo.setCurrentText("1")
         self.stop_bits_combo.installEventFilter(self)       # 禁用滚轮
-        self.stop_bits_combo.setFixedWidth(minimumWidth)    # 设置固定宽度
+        self.stop_bits_combo.setFixedWidth(basic_combo_width) # 设置固定宽度
         stop_bits_layout.addWidget(self.stop_bits_combo)
         basic_layout.addLayout(stop_bits_layout)
 
         # 打开串口按钮
         self.connect_btn = QPushButton("打开串口")
+        self.connect_btn.setMaximumWidth(left_control_max_width)
         self.connect_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.BLUE_BUTTON};
@@ -384,9 +392,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         receive_layout.addLayout(source_checkboxes_layout)
 
         self.save_btn = QPushButton("保存数据")
+        self.save_btn.setMaximumWidth(left_control_max_width)
         self._bind_momentary_button_feedback(self.save_btn, Colors.GREEN_BUTTON)
 
         self.clear_receive_btn = QPushButton("清空数据")
+        self.clear_receive_btn.setMaximumWidth(left_control_max_width)
         self._bind_momentary_button_feedback(self.clear_receive_btn, Colors.GREEN_BUTTON)
 
         receive_layout.addWidget(self.save_btn)
@@ -403,6 +413,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.ending_combo = QComboBox()
         self.ending_combo.addItems(["None", r"\r\n", r"\r", r"\n"])
         self.ending_combo.setCurrentText(r"\r\n")
+        self.ending_combo.setMaximumWidth(left_control_max_width)
         self.ending_combo.installEventFilter(self)          # 禁用滚轮
         send_layout.addWidget(QLabel("结尾标识符:"))
         send_layout.addWidget(self.ending_combo)
@@ -416,6 +427,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.send_color_combo = QComboBox()
         self.send_color_combo.addItems(["红色", "蓝色", "绿色", "紫色", "黑色"])
         self.send_color_combo.setCurrentText("红色")
+        self.send_color_combo.setMaximumWidth(left_control_max_width)
         self.send_color_combo.installEventFilter(self)      # 禁用滚轮
         show_send_layout.addWidget(self.send_color_combo)
         send_layout.addLayout(show_send_layout)
@@ -464,9 +476,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         template_buttons_layout = QHBoxLayout()
         self.import_btn = QPushButton("导入模板")
+        self.import_btn.setMaximumWidth(left_control_max_width)
         self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
 
         self.export_btn = QPushButton("导出模板")
+        self.export_btn.setMaximumWidth(left_control_max_width)
         self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
 
         template_buttons_layout.addWidget(self.import_btn)
@@ -486,6 +500,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         for tool_name in self.config_manager.get_all_tool_names():
             button_text = self.config_manager.get_tool_button_text(tool_name)
             btn = QPushButton(button_text)
+            btn.setMaximumWidth(left_control_max_width)
             self.tools_group.addWidget(btn)
             self.tool_buttons[tool_name] = btn
 
@@ -493,6 +508,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 配置按钮
         self.config_btn = QPushButton("配置")
+        self.config_btn.setMaximumWidth(left_control_max_width)
         self._bind_momentary_button_feedback(self.config_btn, Colors.BLUE_BUTTON)
         layout.addWidget(self.config_btn)
 
@@ -558,7 +574,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         self.jump_row_input = QLineEdit()
         self.jump_row_input.setPlaceholderText("行号")
-        self.jump_row_input.setMaximumWidth(60)
+        self.jump_row_input.setMaximumWidth(self.LEFT_COMPACT_CONTROL_WIDTH)
         continuous_layout.addWidget(self.jump_row_input)
 
         self.jump_row_btn = QPushButton("跳行")
@@ -572,7 +588,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # Mode Sync Button - 将跳转模块同步到发送模块
         self.sync_mode_forward_btn = QPushButton("->")
-        self.sync_mode_forward_btn.setFixedWidth(30)
+        self.sync_mode_forward_btn.setFixedWidth(self.SYNC_BUTTON_WIDTH)
         self.sync_mode_forward_btn.setToolTip("将跳转模式同步到发送模式")
         self._bind_momentary_button_feedback(self.sync_mode_forward_btn, Colors.BLUE_BUTTON, extra_styles="padding: 2px;")
         continuous_layout.addWidget(self.sync_mode_forward_btn)
@@ -584,7 +600,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # Mode Sync Button - 将发送模块同步到跳转模块
         self.sync_mode_btn = QPushButton("<-")
-        self.sync_mode_btn.setFixedWidth(30)
+        self.sync_mode_btn.setFixedWidth(self.SYNC_BUTTON_WIDTH)
         self.sync_mode_btn.setToolTip("将发送模式同步到跳转模式")
         self._bind_momentary_button_feedback(self.sync_mode_btn, Colors.BLUE_BUTTON, extra_styles="padding: 2px;")
         continuous_layout.addWidget(self.sync_mode_btn)
@@ -655,9 +671,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def _tool_button_clicked(self, button, method):
         """工具按钮点击处理"""
         self._apply_button_color(button, Colors.RED_BUTTON)
-        method()
-        if button.isEnabled():
-            self._apply_button_color(button, Colors.BLUE_BUTTON)
+        try:
+            method()
+        finally:
+            if button.isEnabled():
+                self._apply_button_color(button, Colors.BLUE_BUTTON)
 
     def refresh_ports(self):
         """刷新可用串口列表"""
@@ -928,8 +946,16 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if index >= 0:
             self.ending_combo.setCurrentIndex(index)
             self.output_manager.append_text(f"已设置结尾标识符为: {target}", OutputSource.SYSTEM)
-        else:
-            self.output_manager.append_text(f"错误: 不支持的结尾标识符: {ending_text}", OutputSource.ERROR)
+            return
+
+        for i in range(self.ending_combo.count()):
+            item_text = self.ending_combo.itemText(i)
+            if item_text == target or item_text.replace(r"\r", "\r").replace(r"\n", "\n") == target:
+                self.ending_combo.setCurrentIndex(i)
+                self.output_manager.append_text(f"已设置结尾标识符为: {item_text}", OutputSource.SYSTEM)
+                return
+
+        self.output_manager.append_text(f"错误: 不支持的结尾标识符: {ending_text}", OutputSource.ERROR)
 
     def trigger_send_mode(self, module_name):
         """触发指定模块的连续发送 (供特殊指令使用) """
@@ -1399,29 +1425,30 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
                     # 检查特殊指令
                     cmd_type_str, param = UIUtils.parse_special_command(command)
-                    if not enable and cmd_type_str:
-                        if cmd_type_str == 'mode':
-                            current_module = param.strip()
-                            self.modules[current_module] = []
-                            self.jump_module_combo.addItem(current_module)
-                            self.send_module_combo.addItem(current_module)
-                            # 添加系统消息提示模块已创建
-                            self.output_manager.append_text(f"已创建模块: '{current_module}'", OutputSource.SYSTEM)
-                        elif cmd_type_str == 'modeend':
-                            # modeend指令：结束当前模块，切换回默认模块
-                            if current_module != "默认":
-                                current_module = "默认"
-                                # 如果默认模块还未初始化，创建它
-                                if current_module not in self.modules:
-                                    self.modules[current_module] = []
-                                self.output_manager.append_text("模块定义已结束，切换回默认模块", OutputSource.SYSTEM)
-                        # delay指令会在发送时处理
+                    if cmd_type_str == 'mode':
+                        current_module = param.strip()
+                        self.modules[current_module] = []
+                        self.jump_module_combo.addItem(current_module)
+                        self.send_module_combo.addItem(current_module)
+                        # 添加系统消息提示模块已创建
+                        self.output_manager.append_text(f"已创建模块: '{current_module}'", OutputSource.SYSTEM)
+                    elif cmd_type_str == 'modeend':
+                        # modeend指令：结束当前模块，切换回默认模块
+                        if enable:
+                            self.modules[current_module].append(row)
+                        if current_module != "默认":
+                            current_module = "默认"
+                            # 如果默认模块还未初始化，创建它
+                            if current_module not in self.modules:
+                                self.modules[current_module] = []
+                            self.output_manager.append_text("模块定义已结束，切换回默认模块", OutputSource.SYSTEM)
+                    # delay指令会在发送时处理
 
                     # 添加命令到表格 (保持行号对应)
                     self.command_table.add_command_row(enable, command, comment, row)
 
                     # 添加到当前模块 (非注释行和特殊指令行)
-                    if not (enable is False and command == "" and comment):
+                    if cmd_type_str not in ('mode', 'modeend') and not (enable is False and command == "" and comment):
                         self.modules[current_module].append(row)
 
                     row += 1
@@ -1687,37 +1714,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             index = self.jump_module_combo.findText(current_send_mode)
             if index >= 0:
                 self.jump_module_combo.setCurrentIndex(index)
-
-    def set_ending(self, ending_type):
-        """设置结尾标识符
-        
-        Args:
-            ending_type (str): 结尾标识符类型，例如: "None", "\r\n", "\r", "\n"
-                               如果是转义后的字符串 (如 r"\r\n") 也会被尝试匹配
-        """
-        # 尝试在下拉框中找到对应的文本
-        index = self.ending_combo.findText(ending_type)
-        if index >= 0:
-            self.ending_combo.setCurrentIndex(index)
-            # 添加系统消息
-            self.output_manager.append_text(f"SetEndlog: 结尾标识符已设置为 '{ending_type}'", OutputSource.SYSTEM)
-        else:
-            # 尝试处理转义字符的匹配 (例如输入 literal 的 \r\n 匹配 r"\r\n")
-            # 这里简单做个反向查找
-            found = False
-            for i in range(self.ending_combo.count()):
-                item_text = self.ending_combo.itemText(i)
-                # 比较 item_text 和 ending_type 是否在此上下文中等价
-                # 简单比较: 
-                if item_text == ending_type or \
-                   item_text.replace(r"\r", "\r").replace(r"\n", "\n") == ending_type:
-                    self.ending_combo.setCurrentIndex(i)
-                    self.output_manager.append_text(f"SetEndlog: 结尾标识符已设置为 '{item_text}'", OutputSource.SYSTEM)
-                    found = True
-                    break
-            
-            if not found:
-                self.output_manager.append_text(f"SetEndlog 错误: 找不到标识符类型 '{ending_type}'", OutputSource.ERROR)
 
     def _load_legacy_state(self):
         """加载旧版本的平铺式配置 (用于平滑迁移) """

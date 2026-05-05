@@ -1,0 +1,63 @@
+name: Serial Tool Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate release versions
+        id: validate
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          python .github/scripts/validate_serial_tool_release.py \
+            "$TAG_NAME" \
+            README.md \
+            main.py | tee version-output.txt
+          while IFS='=' read -r key value; do
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          done < version-output.txt
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyQt5 pyserial pyinstaller
+
+      - name: Build exe with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller --clean main.spec
+
+      - name: Verify exe exists
+        shell: bash
+        run: |
+          test -f "dist/GHowe_串口调试助手.exe"
+
+      - name: Create GitHub Release and upload exe
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            自动发布的 Windows exe。
+            版本已通过 README 与 main.py 一致性校验。
+          files: |
+            dist/GHowe_串口调试助手.exe

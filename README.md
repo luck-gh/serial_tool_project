@@ -1229,6 +1229,35 @@ dist/
 └── (运行时自动生成配置文件)
 ```
 
+**GitHub 自动发布**:
+
+当你推送 `v1.1.5` 这类版本标签时，仓库中的 GitHub Actions 会自动：
+
+1. 校验 `README.md` 顶部版本号
+2. 校验 `main.py` 中的 `TOOL_VERSION`
+3. 使用 `main.spec` 在 Windows 环境打包 exe
+4. 创建对应版本的 GitHub Release
+5. 上传 exe 到 Release 页面
+
+**发布前检查清单**:
+
+- `README.md` 顶部版本号已更新
+- `main.py` 中 `TOOL_VERSION` 已更新
+- Git tag 使用 `vX.Y.Z` 格式
+- 三者版本完全一致
+
+**示例发布命令**:
+
+```bash
+git add .
+git commit -m "release: v1.1.5"
+git tag v1.1.5
+git push origin master
+git push origin v1.1.5
+```
+
+如果 tag、README、`TOOL_VERSION` 任意不一致，GitHub Actions 会直接失败，不会生成错误的正式 Release。
+
 **详细打包指南**: 参考 [命令行使用指南](docs/COMMAND_LINE_USAGE.md#打包与分发)
 
 ---

@@ -1,14 +1,47 @@
-﻿.settings/
-Debug/
-.claude
-*.pyc
-*.exe
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# PyInstaller
 build/
 dist/
-__pycache__/
-.env
+*.spec.bak
+
+# 测试和临时文件
+test_*.py
+check_icon.py
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# 打包
+Debug/
+*.pyc
+*.exe
+build/*
+dist/*
+
+# claude
+.settings/*
+.claude
+
+# 测试
 test/
 test*
+
+# 数据与配置
 *.json
 *.csv

@@ -402,6 +402,40 @@ tar -czf GHowe串口助手.tar.gz GHowe串口助手
 hdiutil create -volname "GHowe串口助手" -srcfolder dist -ov -format UDZO GHowe串口助手.dmg
 ```
 
+### 使用 GitHub Actions 自动发布
+
+项目支持通过 Git tag 自动打包并发布 Windows exe。
+
+#### 触发条件
+
+推送形如 `v1.1.5` 的版本标签。
+
+#### 自动执行内容
+
+- 校验 `README.md` 版本号
+- 校验 `main.py` 中的 `TOOL_VERSION`
+- 使用 `main.spec` 执行 PyInstaller 打包
+- 创建 GitHub Release
+- 上传 exe 到 Release
+
+#### 发布命令示例
+
+```bash
+git add .
+git commit -m "release: v1.1.5"
+git tag v1.1.5
+git push origin master
+git push origin v1.1.5
+```
+
+#### 常见失败原因
+
+- tag 不是 `vX.Y.Z` 格式
+- README 版本与 tag 不一致
+- `TOOL_VERSION` 与 tag 不一致
+- PyInstaller 打包失败
+- exe 未生成
+
 ---
 
 ## 开发环境

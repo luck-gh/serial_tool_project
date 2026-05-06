@@ -16,6 +16,26 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          path: serial_tool_project
+
+      - name: Checkout number converter project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/number_converter_project
+          path: number_converter_project
+
+      - name: Checkout bin hex converter project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/bin_hex_converter_project
+          path: bin_hex_converter_project
+
+      - name: Checkout firmware downloader project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/firmware_downloader_project
+          path: firmware_downloader_project
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,6 +45,7 @@ jobs:
       - name: Validate release versions
         id: validate
         shell: bash
+        working-directory: serial_tool_project
         run: |
           TAG_NAME="${GITHUB_REF_NAME}"
           python .github/scripts/validate_serial_tool_release.py \
@@ -43,11 +64,13 @@ jobs:
 
       - name: Build exe with PyInstaller
         shell: bash
+        working-directory: serial_tool_project
         run: |
           pyinstaller --clean main.spec
 
       - name: Verify exe exists
         shell: bash
+        working-directory: serial_tool_project
         run: |
           test -f "dist/GHowe_串口调试助手.exe"
 
@@ -60,4 +83,4 @@ jobs:
             自动发布的 Windows exe。
             版本已通过 README 与 main.py 一致性校验。
           files: |
-            dist/GHowe_串口调试助手.exe
+            serial_tool_project/dist/GHowe_串口调试助手.exe

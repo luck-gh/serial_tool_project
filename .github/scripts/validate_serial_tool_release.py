@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+发布校验脚本, 负责检查版本标签, README 版本和主程序版本是否一致。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 from __future__ import annotations
 
 import re

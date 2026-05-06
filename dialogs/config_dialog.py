@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+配置对话框模块, 负责外部工具和工具相关参数的配置界面。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QDialogButtonBox, QFileDialog, QGroupBox, QCheckBox, QComboBox, QSpinBox)
 from managers.config_manager import ConfigManager

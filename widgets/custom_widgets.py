@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+自定义控件模块, 负责接收区文本控件, 可折叠分组框和可点击下拉框等通用控件。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import os
 import subprocess
 import sys
@@ -90,9 +101,11 @@ from managers.config_manager import ConfigManager
 
 class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
     """自定义文本浏览器, 支持右键菜单和外部工具调用"""
-    def __init__(self, config_manager: ConfigManager, parent=None):
+    def __init__(self, config_manager: ConfigManager, parent=None, save_callback=None, clear_callback=None):
         super().__init__(parent)
         self.config_manager = config_manager
+        self.save_callback = save_callback
+        self.clear_callback = clear_callback
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -109,6 +122,19 @@ class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
         select_all_action = QAction("全选\tCtrl+A", self)
         select_all_action.triggered.connect(self.selectAll)
         menu.addAction(select_all_action)
+
+        if self.save_callback or self.clear_callback:
+            menu.addSeparator()
+
+        if self.save_callback:
+            save_action = QAction("保存数据", self)
+            save_action.triggered.connect(self.save_callback)
+            menu.addAction(save_action)
+
+        if self.clear_callback:
+            clear_action = QAction("清空数据", self)
+            clear_action.triggered.connect(self.clear_callback)
+            menu.addAction(clear_action)
 
         # --- 外部工具：数字转换器 ---
         selected_text = self.textCursor().selectedText().strip() if self.textCursor().hasSelection() else None
@@ -223,6 +249,11 @@ class CollapsibleGroupBox(QWidget):
 
     def setExpanded(self, expanded):
         self.toggle_button.setChecked(expanded)
+
+    def setTitle(self, title):
+        """更新标题文本"""
+        self.title_text = title
+        self._update_button_text()
 
     def addWidget(self, widget):
         self.content_layout.addWidget(widget)

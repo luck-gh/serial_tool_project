@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+UI 工具模块, 负责通用枚举, 样式常量, 资源路径和特殊命令解析辅助函数。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import os
 import sys
 import re
@@ -47,6 +58,7 @@ class SpecialCommandType(Enum):
     DELAY = "delay"         # 延迟设置
     SENDHEX = "sendhex"     # 十六进制发送
     BAUDRATE = "baudrate"   # 波特率设置
+    COMPORT = "comport"     # COM口设置
     SETENDLOG = "setendlog" # 结尾符设置
     SENDMODE = "sendmode"   # 发送指定模块
     STOPCONTINUOUS = "stopcontinuous"  # 停止连续发送（可选择是否停止循环）

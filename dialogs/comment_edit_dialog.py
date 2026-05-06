@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+注释编辑对话框模块, 负责命令注释的多行编辑界面。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTextEdit, QDialogButtonBox)
 
 class CommentEditDialog(QDialog):

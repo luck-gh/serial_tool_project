@@ -1,5 +1,18 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+特殊指令管理模块, 负责执行 delay, SendHex, BaudRate, SendMode 等命令序列指令。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 from utils.ui_utils import SpecialCommandType
 from managers.config_manager import ConfigManager
+from core.command_executor import TableCommandProvider, collect_module_commands
+from core import output_rules
 
 class SpecialCommandManager:
     """特殊指令管理器"""
@@ -11,6 +24,7 @@ class SpecialCommandManager:
             SpecialCommandType.DELAY: self._handle_delay,
             SpecialCommandType.SENDHEX: self._handle_sendhex,
             SpecialCommandType.BAUDRATE: self._handle_baudrate,
+            SpecialCommandType.COMPORT: self._handle_comport,
             SpecialCommandType.SETENDLOG: self._handle_setendlog,
             SpecialCommandType.SENDMODE: self._handle_sendmode,
             SpecialCommandType.STOPCONTINUOUS: self._handle_stop_continuous
@@ -86,7 +100,7 @@ class SpecialCommandManager:
             return True
         except Exception as e:
             if hasattr(context, 'output_manager'):
-                context.output_manager.append_text(f"SendHex 错误: {str(e)}", OutputSource.ERROR)
+                context.output_manager.append_text(output_rules.sendhex_error(str(e)), OutputSource.ERROR)
             return False
 
     def _handle_baudrate(self, param, context):
@@ -98,6 +112,14 @@ class SpecialCommandManager:
             return True
         except ValueError:
             return False
+
+    def _handle_comport(self, param, context):
+        """处理 ComPort 指令"""
+        port = param.strip()
+        if hasattr(context, 'update_com_port'):
+            context.update_com_port(port)
+            return True
+        return False
 
     def _handle_setendlog(self, param, context):
         """处理SetEndlog指令"""
@@ -170,8 +192,13 @@ class SpecialCommandManager:
         # 判断当前是否为手动单次发送模式 (非连续发送状态)
         is_manual_mode = not getattr(context, 'is_continuous_sending', False)
 
-        # 检查串口是否已连接
-        if not hasattr(context, 'is_connected') or not context.is_connected:
+        # 检查串口后端是否可发送；远程端模式下不能直接读取本机 is_connected
+        if hasattr(context, 'can_send_serial_data'):
+            can_send = context.can_send_serial_data()
+        else:
+            can_send = hasattr(context, 'is_connected') and context.is_connected
+
+        if not can_send:
             if hasattr(context, 'output_manager'):
                 context.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
             if completion_callback:
@@ -190,51 +217,23 @@ class SpecialCommandManager:
         # 检查模块是否存在
         if module_name not in context.modules and module_name != "全部":
             if hasattr(context, 'output_manager'):
-                context.output_manager.append_text(f"错误: 找不到模块 '{module_name}'", OutputSource.ERROR)
+                context.output_manager.append_text(output_rules.module_not_found(module_name), OutputSource.ERROR)
             if completion_callback:
                 completion_callback()
             return False
 
-        # 收集目标模块的命令
-        commands_to_send = []
-        for row in range(context.command_table.rowCount()):
-            enable, command, comment = context.command_table.get_row_data(row)
-
-            # 检查是否属于目标模块
-            if module_name != "全部" and row not in context.modules.get(module_name, []):
-                continue
-
-            if enable:  # 只发送勾选的命令
-                # 检查是否为特殊指令
-                cmd_type_str, param = UIUtils.parse_special_command(command)
-                if cmd_type_str:
-                    # 处理特殊指令
-                    from utils.ui_utils import SpecialCommandType
-                    command_type = None
-                    for ct in SpecialCommandType:
-                        if ct.value == cmd_type_str:
-                            command_type = ct
-                            break
-
-                    if command_type:
-                        commands_to_send.append((row, command, True, command_type, param))
-                    else:
-                        unescaped_command = UIUtils.unescape_text(command)
-                        commands_to_send.append((row, unescaped_command, False))
-                else:
-                    # 普通命令
-                    unescaped_command = UIUtils.unescape_text(command)
-                    commands_to_send.append((row, unescaped_command, False))
+        # 从 UI 表格读取命令, 模块解析逻辑与 CLI 共用
+        commands_to_send = collect_module_commands(TableCommandProvider(context.command_table), module_name)
 
         if not commands_to_send:
             if hasattr(context, 'output_manager'):
-                context.output_manager.append_text(f"警告: 模块 '{module_name}' 中没有启用的命令", OutputSource.SYSTEM)
+                context.output_manager.append_text(output_rules.module_no_enabled_commands(module_name), OutputSource.SYSTEM)
             if completion_callback:
                 completion_callback()
             return True  # 返回 True 表示执行完成（虽然没发送内容）
 
         if hasattr(context, 'output_manager'):
-            context.output_manager.append_text(f"SendMode: 发送模块 '{module_name}' 的内容", OutputSource.SYSTEM)
+            context.output_manager.append_text(output_rules.sendmode_start(module_name), OutputSource.SYSTEM)
 
         # 发送命令（同步方式，使用延迟链）
         def send_module_command(index=0):
@@ -260,19 +259,22 @@ class SpecialCommandManager:
                     try:
                         delay_ms = float(param.strip())
                         if hasattr(context, 'output_manager'):
-                            context.output_manager.append_text(f"SendMode 延迟: {delay_ms}ms", OutputSource.SYSTEM)
+                            context.output_manager.append_text(output_rules.sendmode_delay(delay_ms), OutputSource.SYSTEM)
                         QTimer.singleShot(int(delay_ms), lambda: send_module_command(index + 1))
                         return
                     except ValueError:
                         if hasattr(context, 'output_manager'):
-                            context.output_manager.append_text(f"错误: 无效的延迟参数: {param}", OutputSource.ERROR)
+                            context.output_manager.append_text(output_rules.invalid_delay(param), OutputSource.ERROR)
                 elif command_type == SpecialCommandType.SENDHEX:
                     if self.execute(command_type, param, context):
                         interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
                         QTimer.singleShot(interval, lambda: send_module_command(index + 1))
                     else:
                         if hasattr(context, 'output_manager'):
-                            context.output_manager.append_text(f"错误: SendHex 执行失败: {param}", OutputSource.ERROR)
+                            context.output_manager.append_text(
+                                output_rules.special_command_failed("SendHex", param),
+                                OutputSource.ERROR,
+                            )
                         interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
                         QTimer.singleShot(interval, lambda: send_module_command(index + 1))
                     return
@@ -294,6 +296,12 @@ class SpecialCommandManager:
                     return
                 elif command_type == SpecialCommandType.BAUDRATE:
                     # 处理 BaudRate 指令
+                    self.execute(command_type, param, context)
+                    interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                    QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+                    return
+                elif command_type == SpecialCommandType.COMPORT:
+                    # 处理 ComPort 指令
                     self.execute(command_type, param, context)
                     interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
                     QTimer.singleShot(interval, lambda: send_module_command(index + 1))

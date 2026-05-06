@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>专为嵌入式开发者设计的高效串口调试工具</strong><br>
-  <sub>版本 1.1.4 | 2026-05-04</sub>
+  <sub>版本 1.2.0 | 2026-05-06</sub>
 </p>
 
 <p align="center">
@@ -21,7 +21,6 @@
 - [快速开始](#快速开始)
 - [核心功能详解](#核心功能详解)
 - [高级功能](#高级功能)
-- [开发者参考](#开发者参考)
 - [故障排查与支持](#故障排查与支持)
 - [相关文档](#相关文档)
 
@@ -31,15 +30,14 @@
 
 GHowe 串口调试助手是一个功能丰富的串口调试工具，基于 PyQt5 构建，提供直观的界面、强大的命令管理、丰富的特殊指令支持，让串口调试变得简单高效。
 
-### 最新更新 (v1.1.4)
+### 最新更新 (v1.2.0)
 
-- ✅ 新增行号跳转控件 - 支持直接输入行号并快速定位到目标命令
-- ✅ 完善模块跳转辅助控件 - 新增 `->` 同步按钮，支持跳转模块与发送模块双向同步
-- ✅ 优化左侧面板布局 - 收窄左侧下拉框与按钮宽度，界面更紧凑
-- ✅ 统一按钮交互反馈 - 瞬时按钮按下变色/释放恢复，执行型按钮运行中变色、结束后恢复
-- ✅ 增强模板导入导出可靠性 - 增加进度弹窗、支持取消、导入取消回滚、导出原子替换
-- ✅ 修复导入模板模块重建 - `mode`/`modeend` 行导入后可正确恢复模块结构
-- ✅ 增强 GUI 回归测试 - 覆盖跳行、按钮反馈、模板取消回滚、左侧宽度约束等场景
+- ✅ 新增远程控制 - 局域网内远程端可连接主控端并控制主控端串口设备
+- ✅ 新增 CLI 模式 - 支持使用同一个 exe 或 `python main.py` 发送普通命令和特殊命令
+- ✅ 统一输出规则 - GUI 与 CLI 共用输出过滤、颜色、时间戳和特殊命令文案
+- ✅ 优化配置结构 - `last_state` 迁移为 `state`，COM 口只保存端口 ID 并保留显示名称
+- ✅ 改进打包发布 - 自动发布时同时 checkout 三个工具项目并随主程序打包
+- ✅ 整理开发文档 - 删除目录级 README，将模块职责集中到开发者笔记
 
 👉 查看完整更新: [版本更新记录](docs/VERSION_HISTORY.md)
 
@@ -50,6 +48,8 @@ GHowe 串口调试助手是一个功能丰富的串口调试工具，基于 PyQt
 - **灵活的发送模式** - 支持单次发送、连续发送、循环发送，精准控制发送间隔（1ms - 9999ms）
 - **智能输出过滤** - 按来源分类显示（发送、接收、系统、错误），快速定位问题
 - **自动状态保存** - 程序关闭时自动保存所有配置、命令、界面布局，下次启动自动恢复
+- **远程控制** - 支持局域网主控端/远程端串口控制
+- **CLI 自动化** - 支持命令行发送字符串、十六进制和特殊命令
 - **外部工具集成** - 支持固件下载工具、进制转换器等，完整传递串口配置和 ACK 参数
 
 ### 技术特点
@@ -57,6 +57,8 @@ GHowe 串口调试助手是一个功能丰富的串口调试工具，基于 PyQt
 - 🎯 **工具注册表机制** - 集中管理所有工具配置，易于扩展
 - ⚡ **非阻塞异步执行** - 使用 QTimer 实现特殊指令，UI 始终响应
 - 🔄 **版本自动兼容** - 配置文件自动迁移，无需手动升级
+- 🖥️ **GUI/CLI 双模式** - 同一个入口支持界面操作和脚本自动化调用
+- 🌐 **局域网远程控制** - 支持主控端/远程端协同控制串口设备
 - 🎨 **模块化架构** - 清晰的代码结构，便于维护和二次开发
 - 🔧 **完整串口参数** - 支持数据位、校验位、停止位完整配置传递
 - 📋 **标准 CSV 处理** - 符合 RFC 4180 标准，兼容 Excel/LibreOffice
@@ -161,6 +163,48 @@ python main.py
    ↓          ↓          ↓          ↓        ↓        ↓
  pip安装   运行main.py  选择端口  输入AT命令  按Enter  接收区显示
 ```
+
+### CLI 命令格式
+
+CLI 模式使用配置文件中的 `state.basic_settings` 打开串口, 并按 `state` 中的显示设置输出发送和接收数据。
+
+```bash
+# 发送普通字符串
+python main.py --cli --send "AT"
+GHowe_串口调试助手.exe --cli --send "AT"
+
+# 指定配置文件
+python main.py --cli --config custom_config.json --send "AT"
+
+# 发送十六进制数据
+python main.py --cli --send "SendHex:AA 55 01"
+
+# 修改配置中的 COM 口和波特率
+python main.py --cli --port COM5
+python main.py --cli --baudrate 115200
+
+# 使用特殊命令修改串口配置
+python main.py --cli --send "ComPort:COM5"
+python main.py --cli --send "BaudRate:115200"
+python main.py --cli --send "SetEndlog:\r\n"
+
+# 按配置文件 state.commands 中的模块发送
+python main.py --cli --send "Mode:初始化"
+python main.py --cli --send "SendMode:初始化"
+```
+
+常用参数:
+
+| 参数 | 说明 |
+|------|------|
+| `--cli` | 启用 CLI 模式 |
+| `--send "命令"` | 发送字符串或特殊命令 |
+| `--config 文件` | 指定配置文件 |
+| `--port COMx` | 更新配置中的 COM 口 |
+| `--baudrate 115200` | 更新配置中的波特率 |
+| `--read-timeout 300` | 发送后读取等待时间, 单位 ms |
+
+完整说明见 [命令行使用指南](docs/COMMAND_LINE_USAGE.md)。
 
 ---
 
@@ -887,413 +931,6 @@ AT+CMGL="ALL"
 
 ---
 
-## 开发者参考
-
-### 1. 项目架构
-
-```
-serial_tool_project/
-├── main.py                          # 应用程序主入口 (38 行)
-├── main_window.py                   # 主窗口 UI 布局和核心逻辑 (~1500 行)
-├── main_config.json                 # 应用程序配置文件 (自动生成)
-├── main.spec                        # PyInstaller 打包配置
-├── resources/
-│   └── HOWE_LOGO.ico               # 应用程序图标
-├── core/                            # 核心功能模块
-│   ├── __init__.py
-│   ├── README.md
-│   └── serial_thread.py            # 串口通信线程 (异步收发)
-├── managers/                        # 功能管理模块
-│   ├── __init__.py
-│   ├── README.md
-│   ├── config_manager.py           # 配置管理器 (工具注册表)
-│   ├── output_manager.py           # 输出管理器 (日志分类过滤)
-│   └── special_command_manager.py  # 特殊指令管理器 (非阻塞执行)
-├── widgets/                         # 自定义 UI 控件
-│   ├── __init__.py
-│   ├── README.md
-│   ├── base_widgets.py             # 基础控件混入类
-│   ├── custom_widgets.py           # 自定义控件库
-│   └── command_widgets.py          # 命令表格控件
-├── utils/                           # 辅助工具和 UI 样式
-│   ├── __init__.py
-│   ├── README.md
-│   └── ui_utils.py                 # UI 工具类、枚举、颜色常量
-├── dialogs/                         # 交互对话框
-│   ├── __init__.py
-│   ├── README.md
-│   ├── config_dialog.py            # 配置对话框 (工具设置)
-│   └── comment_edit_dialog.py      # 注释编辑对话框
-└── docs/                            # 文档目录
-    ├── VERSION_HISTORY.md          # 版本更新记录
-    ├── COMMAND_LINE_USAGE.md       # 命令行使用指南
-    └── DEVELOPER_NOTES.md          # 开发者笔记
-```
-
-**代码统计**:
-- 总代码行数: ~3,300 行 Python 代码
-- 核心模块: 12 个 Python 文件
-- 自定义控件: 5+ 个
-- 管理器模块: 3 个
-
-**当前版本**: v1.1.4 (2026-05-04)
-
----
-
-### 2. 架构设计原则
-
-#### 2.1 工具注册表机制
-
-本项目采用**集中式工具注册表**设计,所有工具的元数据和默认配置统一管理在 `ConfigManager.REGISTERED_TOOLS` 中。
-
-**设计优势**:
-
-- ✅ **单一数据源** - 默认配置集中定义,避免分散和不一致
-- ✅ **自动同步** - 修改注册表中的默认值,所有引用处自动同步
-- ✅ **易于扩展** - 添加新工具只需在注册表中注册,无需修改多处代码
-- ✅ **DRY 原则** - 消除重复代码,提高可维护性
-
-**注册表结构示例**:
-
-```python
-# managers/config_manager.py
-REGISTERED_TOOLS = {
-    "firmware_downloader": {
-        "display_name": "固件下载工具",
-        "button_text": "固件下载",
-        "requires_serial_port": True,
-        "default_config": {
-            "path": "",
-            "enabled": True,
-            "packet_size": 256,
-            "start_command": "download 0\\n",
-            # ... 其他参数
-        }
-    }
-}
-```
-
-**添加新工具流程**:
-
-1. 在 `REGISTERED_TOOLS` 中注册工具信息
-2. 在 `main_window.py` 的 `tool_method_map` 中添加方法映射
-3. 实现工具的打开方法
-4. (可选) 在配置对话框中添加参数界面
-
-#### 2.2 特殊指令系统
-
-特殊指令采用**非阻塞异步执行**设计,确保 UI 响应性:
-
-- **delay** - 使用 `QTimer.singleShot` 实现非阻塞延迟
-- **SendMode** - 使用完成回调机制确保模块间顺序执行
-- **BaudRate** - 异步重连串口,不阻塞界面
-
-**SendMode 执行流程**:
-
-```python
-# 完成回调机制确保顺序执行
-def execute_sendmode_inline(self, module_name, context, completion_callback=None):
-    def send_module_command(index=0):
-        if index >= len(commands_to_send):
-            if completion_callback:
-                completion_callback()  # 执行完毕后回调
-            return
-        # 发送命令...
-```
-
-#### 2.3 配置持久化
-
-采用**增量保存**策略,只在配置变更时写入文件:
-
-```python
-# 配置文件结构
-{
-    "tool_version": "1.0.1",
-    "config_version": "1.0.1",
-    "config_last_updated": "2026-01-18 12:00:00",
-    "tools": {
-        "tool_name": {
-            "path": "",
-            "enabled": true,
-            # ... 工具特定参数
-        }
-    },
-    "last_state": {
-        "basic_settings": { ... },
-        "receive_settings": { ... },
-        "send_settings": { ... },
-        "ui_settings": { ... },
-        "commands": [ ... ]
-    }
-}
-```
-
-**版本兼容性机制**:
-
-- 检测配置文件版本,自动迁移旧版本配置
-- 缺少的配置项自动从 `REGISTERED_TOOLS` 补充默认值
-- 向后兼容,无需用户手动迁移
-
----
-
-### 3. 模块化设计
-
-#### 2.1 核心依赖模块
-
-- **PyQt5** - 主要的 GUI 框架
-  - `PyQt5.QtWidgets` - 所有基础控件
-  - `PyQt5.QtCore` - 核心功能（Qt, QThread, QTimer, pyqtSignal）
-  - `PyQt5.QtGui` - 图形界面（QFont, QColor, QIcon）
-  - 安装：`pip install PyQt5`
-  - 版本建议：5.15.x
-
-- **pyserial** - 串口通信
-  - `serial` - 串口通信核心库
-  - `serial.tools.list_ports` - 端口检测工具
-  - 安装：`pip install pyserial`
-  - 版本建议：3.5+
-
-#### 2.2 自定义模块
-
-**core/serial_thread.py** - 串口通信线程
-- `SerialThread` - 异步串口数据收发
-- 确保 UI 响应性
-
-**managers/config_manager.py** - 配置管理器
-- 自动保存/恢复应用状态
-- JSON 配置文件处理
-
-**managers/output_manager.py** - 输出管理器
-- 日志分类和过滤
-- 输出格式化
-
-**managers/special_command_manager.py** - 特殊指令管理器
-- 解析和执行特殊命令
-
-**widgets/custom_widgets.py** - 自定义控件库
-- `CustomTextBrowser` - 自定义文本浏览器，支持右键菜单
-- `CollapsibleGroupBox` - 可折叠分组框
-- `ClickableComboBox` - 可点击的下拉框
-
-**widgets/command_widgets.py** - 命令相关控件
-- `CommandTableWidget` - 命令表格控件，支持批量操作
-
-**utils/ui_utils.py** - UI 工具类
-- 提供统一的样式设置方法
-- 颜色常量定义（Colors 类）
-- 资源路径处理函数（resource_path）
-
----
-
-### 3. UI 风格规范
-
-#### 3.1 窗口设置
-
-- **窗口标题**：使用描述性标题，如 "GHowe 串口调试助手"
-- **窗口图标**：使用 ICO 格式图标，通过 resource_path 加载
-- **窗口大小**：默认适应内容，可调整
-- **样式设置**：使用 Fusion 样式（`QStyleFactory.create('Fusion')`）
-- **关闭行为**：自动保存状态后退出
-
-#### 3.2 布局设计
-
-- **主布局**：QVBoxLayout 和 QHBoxLayout 结合使用
-- **分组**：使用 QGroupBox 和 CollapsibleGroupBox 组织相关控件
-- **分割器**：QSplitter 用于可调整大小的面板
-- **网格布局**：QGridLayout 用于表格和规则排列
-- **滚动区域**：QScrollArea 用于长内容
-
-#### 3.3 控件样式
-
-- **字体**：使用 UIUtils 设置统一字体
-- **颜色**：使用 Colors 类定义的颜色常量
-- **间距**：合理使用布局边距（5-10px）
-- **对齐**：左对齐为主，标签右对齐
-- **主题**：支持浅色/深色主题切换
-
----
-
-### 4. 配置文件说明
-
-**配置文件位置**: `项目根目录/main_config.json` (或 `可执行文件名_config.json`)
-
-**配置文件结构**:
-
-```json
-{
-  "tool_version": "1.1.1",
-  "tool_update_time": "2026-01-23 10:57:53",
-  "config_version": "1.1.1",
-  "config_last_updated": "2026-01-23 15:00:00",
-  "tools": {
-    "number_conversion_dialog": {
-      "enabled": true,
-      "path": "",
-      "data_width": "DWORD",
-      "always_on_top": false
-    },
-    "firmware_downloader": {
-      "enabled": true,
-      "path": "D:/Tools/FirmwareDownloader.exe",
-      "packet_size": 256,
-      "start_command": "download 0\\n",
-      "wait_start_ack": true,
-      // ... 40+ 个配置参数
-    }
-  },
-  "last_used_directory": "D:/Projects/",
-  "last_state": {
-    "basic_settings": {
-      "port": "COM3",
-      "baudrate": 115200,
-      "databits": 8,
-      "parity": "None",
-      "stopbits": 1
-    },
-    "receive_settings": {
-      "auto_scroll": true,
-      "show_timestamp": true,
-      "pause_display": false
-    },
-    "send_settings": {
-      "ending": "\\r\\n",
-      "continuous_interval": 100,
-      "loop_interval": 1000,
-      "loop_send": false
-    },
-    "ui_settings": {
-      "window_geometry": [100, 100, 1400, 800],
-      "splitter_sizes": [400, 1000]
-    },
-    "commands": [
-      {
-        "checked": true,
-        "command": "AT+CMGF=1",
-        "comment": "设置文本模式"
-      }
-    ]
-  }
-}
-```
-
-**主要字段说明**:
-
-- `tool_version` - 工具版本号 (当前: 1.1.1)
-- `config_version` - 配置文件版本 (当前: 1.1.1)
-- `tools` - 外部工具配置 (完整传递 40+ 参数)
-- `last_used_directory` - 最后使用的文件目录
-- `last_state` - 上次保存的所有状态 (命令、串口配置、UI 布局等)
-
-**版本兼容性**:
-
-- ✅ 自动检测配置文件版本
-- ✅ 自动迁移旧版本配置
-- ✅ 自动补充缺失的默认值
-- ✅ 拒绝加载版本过高的配置文件
-
----
-
-### 5. 打包发布
-
-使用 PyInstaller 打包为独立可执行文件。
-
-**快速打包**:
-
-```bash
-# 安装 PyInstaller
-pip install pyinstaller
-
-# 使用 spec 文件打包 (推荐)
-pyinstaller main.spec
-
-# 或使用命令行参数打包
-pyinstaller --onefile --windowed --icon=resources/HOWE_LOGO.ico main.py
-```
-
-**打包选项说明**:
-
-| 选项 | 说明 | 推荐 |
-|------|------|------|
-| `--onefile` | 打包成单个可执行文件 | ✅ 推荐 |
-| `--windowed` | 隐藏控制台窗口 (GUI 应用) | ✅ 推荐 |
-| `--icon` | 设置应用图标 | ✅ 推荐 |
-| `--add-data` | 添加资源文件 | 按需使用 |
-| `--name` | 指定可执行文件名 | 按需使用 |
-| `--clean` | 清理临时文件 | 推荐 |
-
-**打包后目录结构**:
-
-```
-dist/
-├── GHowe串口助手.exe          # 可执行文件
-└── (运行时自动生成配置文件)
-```
-
-**GitHub 自动发布**:
-
-当你推送 `v1.1.5` 这类版本标签时，仓库中的 GitHub Actions 会自动：
-
-1. 校验 `README.md` 顶部版本号
-2. 校验 `main.py` 中的 `TOOL_VERSION`
-3. 使用 `main.spec` 在 Windows 环境打包 exe
-4. 创建对应版本的 GitHub Release
-5. 上传 exe 到 Release 页面
-
-**发布前检查清单**:
-
-- `README.md` 顶部版本号已更新
-- `main.py` 中 `TOOL_VERSION` 已更新
-- Git tag 使用 `vX.Y.Z` 格式
-- 三者版本完全一致
-
-**示例发布命令**:
-
-```bash
-git add .
-git commit -m "release: v1.1.5"
-git tag v1.1.5
-git push origin master
-git push origin v1.1.5
-```
-
-如果 tag、README、`TOOL_VERSION` 任意不一致，GitHub Actions 会直接失败，不会生成错误的正式 Release。
-
-**详细打包指南**: 参考 [命令行使用指南](docs/COMMAND_LINE_USAGE.md#打包与分发)
-
----
-
-### 6. 扩展开发
-
-#### 添加新的特殊指令
-
-1. 在 `utils/ui_utils.py` 的 `SpecialCommandType` 中注册指令
-2. 在 `managers/special_command_manager.py` 中实现解析和执行逻辑
-3. 在 `main_window.py` 中集成指令
-
-#### 添加新的外部工具
-
-1. 在 `managers/config_manager.py` 的 `REGISTERED_TOOLS` 中注册工具
-2. 在 `main_window.py` 中添加按钮和打开方法
-3. 在 `dialogs/config_dialog.py` 中添加配置界面
-4. 工具配置自动持久化，无需额外代码
-
-**详细扩展指南**: 参考 [开发者笔记](docs/DEVELOPER_NOTES.md#扩展开发指南)
-
----
-
-### 7. 最佳实践
-
-1. **模块化设计** - UI 控件、业务逻辑、管理器分离
-2. **资源路径管理** - 使用 `resource_path()` 函数统一处理资源路径
-3. **多线程安全** - 串口通信在独立线程，避免阻塞 UI
-4. **状态持久化** - 自动保存和恢复用户状态
-5. **错误处理** - 完善的异常处理和用户友好提示
-6. **工具注册表** - 集中管理工具配置，易于扩展
-
-**更多技术细节**: 参考 [开发者笔记](docs/DEVELOPER_NOTES.md)
-
----
-
 ## 故障排查与支持
 
 ### 常见问题 FAQ
@@ -1456,3 +1093,4 @@ ls /dev/cu.*
   <strong>GHowe 串口调试助手 - 让串口调试更简单</strong><br>
   Made with ❤️ by GHowe
 </p>
+

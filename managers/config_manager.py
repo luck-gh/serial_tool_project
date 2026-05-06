@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+配置管理模块, 负责配置文件加载, 版本迁移, 工具注册表和配置持久化。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import json
 import os
 import datetime
@@ -115,6 +126,12 @@ class ConfigManager:
         # 确保 tools 字段存在
         if "tools" not in config:
             config["tools"] = {}
+            migrated = True
+
+        if "last_state" in config:
+            if "state" not in config:
+                config["state"] = config["last_state"]
+            del config["last_state"]
             migrated = True
 
         # 迁移旧格式的工具配置（字符串 -> 字典）

@@ -60,7 +60,7 @@
 ### 示例 spec 配置
 ```python
 subproject_dir = os.path.abspath(os.path.join('..', 'your_subproject'))
-bundle_env = os.environ.get('BUNDLE_SUBPROJECT', '').lower().strip()
+bundle_env = os.environ.get('BUNDLE_YOUR_SUBPROJECT', '').lower().strip()
 bundle = bundle_env == 'true' if bundle_env else os.path.exists(subproject_dir)
 
 if bundle:
@@ -82,8 +82,9 @@ except ImportError:
 
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
-| `BUNDLE_CALC` | 控制进制转换器打包 | 目录存在时为 true |
-| `BUNDLE_SUBPROJECT` | 控制其他子工程打包 | 目录存在时为 true |
+| `BUNDLE_NUMBER_CONVERTER` | 控制 `number_converter_project` 打包 | 目录存在时为 true |
+| `BUNDLE_BIN_HEX_CONVERTER` | 控制 `bin_hex_converter_project` 打包 | 目录存在时为 true |
+| `BUNDLE_FIRMWARE_DOWNLOADER` | 控制 `firmware_downloader_project` 打包 | 目录存在时为 true |
 
 ## 注意事项
 

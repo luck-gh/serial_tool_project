@@ -4,6 +4,142 @@
 
 ---
 
+## 版本 1.2.0 (2026-05-06)
+
+### 摘要
+
+```txt
+新增远程控制和 CLI 自动化能力, 重构输出与命令复用路径, 完善自动打包集成
+
+主要更新内容:
+1. 新增远程控制 - 支持局域网主控端/远程端连接, 远程控制主控端串口设备
+2. 新增 CLI 模式 - 支持普通字符串, SendHex, BaudRate, ComPort, SetEndlog, Mode/SendMode 等命令
+3. 统一输出规则 - GUI 与 CLI 共用输出过滤, 时间戳, 颜色和特殊命令文案
+4. 优化配置结构 - `last_state` 迁移为 `state`, COM 口保存端口 ID 并保留显示名称
+5. 改进远程端基本设置 - 远程模式下基本设置显示主控端信息, 并避免误开本地串口
+6. 改进自动打包 - GitHub Actions 同时 checkout 三个工具项目并随主程序打包
+7. 整理开发文档 - 删除目录级 README, 集中维护 `DEVELOPER_NOTES.md`, 并统一 Python 文件头注释
+
+修改文件:
+- main.py
+- main.spec
+- main_window.py
+- core/remote_control.py
+- core/cli_runner.py
+- core/command_executor.py
+- core/output_rules.py
+- managers/output_manager.py
+- managers/special_command_manager.py
+- managers/config_manager.py
+- widgets/base_widgets.py
+- widgets/custom_widgets.py
+- widgets/command_widgets.py
+- dialogs/config_dialog.py
+- docs/COMMAND_LINE_USAGE.md
+- docs/DEVELOPER_NOTES.md
+- .github/workflows/serial-tool-release.yml
+- README.md
+
+版本更新: 1.1.4 -> 1.2.0
+```
+
+### 远程控制
+
+- **新增** 主控端/远程端模式
+  - 主控端负责连接真实串口设备
+  - 远程端通过局域网连接主控端并转发串口数据
+  - 支持密码校验和连接错误回显
+- **新增** 主控端 IP 选择
+  - 主控端可检测本机 IP 并供用户选择
+  - 远程端可输入主控端地址和端口
+- **优化** 远程端基本设置
+  - 远程端连接后, "基本设置" 显示为 "基本设置 (主控端信息)"
+  - 使用蓝色背景区分主控端硬件配置的虚拟显示状态
+  - 远程端刷新端口时请求主控端扫描端口并同步基本配置
+- **修复** 远程端误操作本地串口
+  - 远程模式下开启/关闭串口请求会发送到主控端
+  - 避免远程端打开自身真实串口
+- **修复** 远程连接关闭时的 socket 关闭异常噪音
+  - 抑制正常关闭过程中 `[WinError 10038]` 这类非必要错误
+
+### CLI 模式
+
+- **新增** CLI 入口
+  - 支持 `python main.py --cli --send "AT"`
+  - 打包后支持 `GHowe_串口调试助手.exe --cli --send "AT"`
+- **新增** CLI 特殊命令支持
+  - `SendHex`
+  - `BaudRate`
+  - `ComPort` / `Com`
+  - `SetEndlog`
+  - `Mode` / `SendMode`
+  - `Delay`
+- **优化** CLI 命令执行
+  - CLI 与 GUI 共用模块命令解析逻辑
+  - `Mode` / `SendMode` 以配置文件 `state.commands` 为数据源
+  - `Delay` 等待期间可读取串口返回数据
+  - 修复 `modeend` 被误当普通命令发送的问题
+- **优化** CLI 输出
+  - CLI 读取配置中的输出过滤选项
+  - 支持 VT100 颜色
+  - 接收数据使用白色输出
+  - 发送数据不再打印字节统计, 与 GUI 显示逻辑对齐
+
+### 输出与命令复用
+
+- **新增** `core/output_rules.py`
+  - 集中管理输出过滤, 时间戳, 颜色映射和共享文案
+  - GUI `OutputManager` 和 CLI `CliOutput` 共用同一套输出规则
+- **新增** `core/command_executor.py`
+  - 统一解析 GUI 表格和配置文件中的命令模块
+  - 复用 `mode` / `modeend` / `SendMode` 相关逻辑
+- **优化** 特殊命令文案
+  - `SendMode: 发送模块 'xxx' 的内容`
+  - `SendMode 延迟: Xms`
+  - `波特率已更新为: xxx`
+  - `已设置结尾标识符为: xxx`
+  - `COM口已更新为: xxx`
+
+### 配置与文档
+
+- **优化** 配置结构
+  - 主状态字段由 `last_state` 迁移为 `state`
+  - 保留旧字段自动迁移兼容
+  - COM 口保存为端口 ID, 如 `COM5`
+  - 新增 `port_node` 保存显示名称, 如 `COM5 - USB-SERIAL CH340`
+- **整理** README
+  - 根 README 聚焦用户说明
+  - 开发者参考迁移到 `docs/DEVELOPER_NOTES.md`
+- **整理** 目录文档
+  - 删除 `core/README.md`, `managers/README.md`, `widgets/README.md`, `utils/README.md`, `dialogs/README.md`
+  - 在 `DEVELOPER_NOTES.md` 集中说明目录职责和每个 Python 文件职责
+- **统一** Python 文件头注释
+  - 所有源码, 测试脚本和发布脚本统一添加文件简介和作者信息
+
+### 打包发布
+
+- **优化** GitHub Actions 自动打包
+  - 自动 checkout 同一 GitHub 用户/组织下的三个工具仓库:
+    - `number_converter_project`
+    - `bin_hex_converter_project`
+    - `firmware_downloader_project`
+  - `main.spec` 会检测同级目录并随主程序打包
+- **新增** 打包环境变量
+  - `BUNDLE_NUMBER_CONVERTER`
+  - `BUNDLE_BIN_HEX_CONVERTER`
+  - `BUNDLE_FIRMWARE_DOWNLOADER`
+- **调整** 单 exe 双模式
+  - 使用 `console=True` 保证 CLI 输出
+  - GUI 模式启动时隐藏控制台窗口
+
+### 版本信息
+
+- 工具版本: 1.1.4 → 1.2.0
+- 配置版本: 1.1.4 → 1.2.0
+- 更新时间: 2026-05-06
+
+---
+
 ## 版本 1.1.4 (2026-05-04)
 
 ### 摘要

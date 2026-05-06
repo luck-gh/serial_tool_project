@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+串口线程模块, 负责在后台线程中执行串口打开, 读取, 写入和错误上报。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import serial
 import serial.tools.list_ports
 from PyQt5.QtCore import QThread, pyqtSignal

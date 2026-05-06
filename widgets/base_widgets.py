@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+基础控件混入模块, 负责外部工具启动, 数值转换器调用和共享控件辅助逻辑。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import os
 import sys
 import subprocess

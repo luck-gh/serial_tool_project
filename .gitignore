@@ -39,6 +39,7 @@ dist/*
 .claude
 
 # 测试
+.pytest_cache/
 test/
 test*
 

@@ -1,7 +1,19 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+主窗口模块, 负责串口工具 GUI 布局, 用户交互, 状态保存和远程控制协调。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import sys
 import os
 import csv
 import re
+import socket
 import tempfile
 from collections import OrderedDict
 
@@ -23,6 +35,8 @@ from widgets.command_widgets import CommandTableWidget
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
 from core.serial_thread import SerialThread
+from core.remote_control import RemoteControlClient, RemoteControlServer
+from core import output_rules
 from managers.config_manager import ConfigManager
 from dialogs.config_dialog import ConfigDialog
 from widgets.base_widgets import BaseWidgetMixin
@@ -41,6 +55,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.tool_version_date = tool_version_date
         self.exe_name = exe_name
         self.serial_thread = None
+        self.remote_thread = None
+        self.remote_mode = "off"
+        self.remote_client_connected = False
+        self.remote_serial_connected = False
         self.is_connected = False
         self.send_count = 0
         self.receive_count = 0
@@ -281,8 +299,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         layout.setContentsMargins(12, 12, 12, 12)
 
         # 基本设置
-        basic_group = QGroupBox("基本设置")
-        basic_layout = QVBoxLayout(basic_group)
+        self.basic_group = CollapsibleGroupBox("基本设置")
+        basic_layout = self.basic_group.content_layout
         basic_layout.setSpacing(8)
 
         # 添加刷新按钮
@@ -361,11 +379,65 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
         basic_layout.addWidget(self.connect_btn)
 
-        layout.addWidget(basic_group)
+        layout.addWidget(self.basic_group)
+
+        # 远程控制
+        self.remote_group = CollapsibleGroupBox("远程控制")
+        remote_layout = self.remote_group.content_layout
+        remote_layout.setSpacing(8)
+
+        remote_mode_layout = QHBoxLayout()
+        remote_mode_layout.addWidget(QLabel("模式:"))
+        self.remote_mode_combo = QComboBox()
+        self.remote_mode_combo.addItems(["主控端", "远程端"])
+        self.remote_mode_combo.installEventFilter(self)
+        self.remote_mode_combo.setFixedWidth(basic_combo_width)
+        remote_mode_layout.addWidget(self.remote_mode_combo)
+        remote_layout.addLayout(remote_mode_layout)
+
+        remote_host_layout = QHBoxLayout()
+        remote_host_layout.addWidget(QLabel("地址:"))
+        self.remote_host_input = QComboBox()
+        self.remote_host_input.setEditable(True)
+        self.remote_host_input.addItem("127.0.0.1")
+        self.remote_host_input.installEventFilter(self)
+        self.remote_host_input.setFixedWidth(basic_combo_width)
+        remote_host_layout.addWidget(self.remote_host_input)
+        remote_layout.addLayout(remote_host_layout)
+
+        remote_port_layout = QHBoxLayout()
+        remote_port_layout.addWidget(QLabel("端口:"))
+        self.remote_port_spin = QSpinBox()
+        self.remote_port_spin.setRange(1, 65535)
+        self.remote_port_spin.setValue(8765)
+        self.remote_port_spin.setFixedWidth(basic_combo_width)
+        self.remote_port_spin.installEventFilter(self)            # 禁用滚轮
+        remote_port_layout.addWidget(self.remote_port_spin)
+        remote_layout.addLayout(remote_port_layout)
+
+        remote_token_layout = QHBoxLayout()
+        remote_token_layout.addWidget(QLabel("密码:"))
+        self.remote_show_token_check = QCheckBox("显示密码")
+        remote_token_layout.addWidget(self.remote_show_token_check)
+        self.remote_token_input = QLineEdit()
+        self.remote_token_input.setEchoMode(QLineEdit.Password)
+        self.remote_token_input.setFixedWidth(basic_combo_width)
+        remote_token_layout.addWidget(self.remote_token_input)
+        remote_layout.addLayout(remote_token_layout)
+
+        self.remote_toggle_btn = QPushButton("启用远程控制")
+        self.remote_toggle_btn.setMaximumWidth(left_control_max_width)
+        self._apply_button_color(self.remote_toggle_btn, Colors.BLUE_BUTTON)
+        remote_layout.addWidget(self.remote_toggle_btn)
+
+        self.remote_status_label = QLabel("远程: 未启用")
+        remote_layout.addWidget(self.remote_status_label)
+
+        layout.addWidget(self.remote_group)
 
         # 接收设置
-        receive_group = QGroupBox("接收设置")
-        receive_layout = QVBoxLayout(receive_group)
+        self.receive_group = CollapsibleGroupBox("接收设置")
+        receive_layout = self.receive_group.content_layout
         receive_layout.setSpacing(8)
 
         # 输出来源类型勾选
@@ -402,11 +474,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         receive_layout.addWidget(self.save_btn)
         receive_layout.addWidget(self.clear_receive_btn)
 
-        layout.addWidget(receive_group)
+        layout.addWidget(self.receive_group)
 
         # 发送设置
-        send_group = QGroupBox("发送设置")
-        send_layout = QVBoxLayout(send_group)
+        self.send_group = CollapsibleGroupBox("发送设置")
+        send_layout = self.send_group.content_layout
         send_layout.setSpacing(8)
 
         # 结尾标识符
@@ -456,22 +528,22 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         loop_layout.addWidget(self.loop_interval_spin)
         send_layout.addLayout(loop_layout)
 
-        layout.addWidget(send_group)
+        layout.addWidget(self.send_group)
 
         # 其他设置
-        other_group = QGroupBox("其他设置")
-        other_layout = QVBoxLayout(other_group)
+        self.other_group = CollapsibleGroupBox("其他设置")
+        other_layout = self.other_group.content_layout
         other_layout.setSpacing(8)
 
         self.timestamp_check = QCheckBox("显示时间戳")
         self.timestamp_check.setChecked(False)
         other_layout.addWidget(self.timestamp_check)
 
-        layout.addWidget(other_group)
+        layout.addWidget(self.other_group)
 
         # 模板相关
-        template_group = QGroupBox("模板相关")
-        template_layout = QVBoxLayout(template_group)
+        self.template_group = CollapsibleGroupBox("模板相关")
+        template_layout = self.template_group.content_layout
         template_layout.setSpacing(8)
 
         template_buttons_layout = QHBoxLayout()
@@ -487,7 +559,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         template_buttons_layout.addWidget(self.export_btn)
         template_layout.addLayout(template_buttons_layout)
 
-        layout.addWidget(template_group)
+        layout.addWidget(self.template_group)
 
         # 添加弹性空间
         layout.addStretch()
@@ -529,7 +601,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         receive_layout = QVBoxLayout(receive_group)
 
         # 接收显示区-右键菜单
-        self.receive_browser = CustomTextBrowser(self.config_manager)
+        self.receive_browser = CustomTextBrowser(
+            self.config_manager,
+            save_callback=self.save_receive_data,
+            clear_callback=self.clear_receive_data
+        )
         self.receive_browser.setFont(QFont("Consolas", 10))
         receive_layout.addWidget(self.receive_browser)
 
@@ -641,6 +717,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def connect_signals(self):
         """连接信号槽"""
         self.connect_btn.clicked.connect(self.toggle_serial_connection)
+        self.remote_toggle_btn.clicked.connect(self.toggle_remote_control)
+        self.remote_mode_combo.currentTextChanged.connect(self.update_remote_host_options)
+        self.remote_show_token_check.toggled.connect(self.toggle_remote_token_visibility)
         self.refresh_ports_btn.clicked.connect(self.refresh_ports)
         self.save_btn.clicked.connect(self.save_receive_data)
         self.clear_receive_btn.clicked.connect(self.clear_receive_data)
@@ -679,6 +758,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def refresh_ports(self):
         """刷新可用串口列表"""
+        if self.is_remote_client_active():
+            self.refresh_remote_ports()
+            return
         current_text = self.port_combo.currentText()
         self.port_combo.clear()
 
@@ -690,12 +772,398 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if current_text and self.port_combo.findText(current_text) >= 0:
             self.port_combo.setCurrentText(current_text)
 
+    def get_selected_port_id(self):
+        return self.port_combo.currentText().strip().split(" ")[0]
+
+    def get_selected_port_node(self):
+        text = self.port_combo.currentText().strip()
+        port_id = self.get_selected_port_id()
+        suffix = f" ({port_id})"
+        if port_id and text.endswith(suffix):
+            text = text[:-len(suffix)].strip()
+        return text
+
+    def refresh_remote_ports(self):
+        """远程端请求主控端扫描串口并同步基本设置"""
+        if not self.remote_thread or not self.remote_client_connected:
+            self.output_manager.append_text("错误: 远程串口未连接", OutputSource.ERROR)
+            return
+        self.output_manager.append_text("主控端刷新端口", OutputSource.SYSTEM)
+        self.remote_thread.send_serial_control("refresh_ports")
+
+    def get_local_ipv4_addresses(self):
+        """获取本机可用于局域网连接的 IPv4 地址"""
+        addresses = []
+        try:
+            hostname = socket.gethostname()
+            for item in socket.getaddrinfo(hostname, None, socket.AF_INET):
+                ip = item[4][0]
+                if ip not in addresses:
+                    addresses.append(ip)
+        except OSError:
+            pass
+
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(("8.8.8.8", 80))
+            ip = probe.getsockname()[0]
+            if ip not in addresses:
+                addresses.insert(0, ip)
+            probe.close()
+        except OSError:
+            pass
+
+        if "127.0.0.1" not in addresses:
+            addresses.append("127.0.0.1")
+        return addresses
+
+    def update_remote_host_options(self):
+        """根据远程模式刷新地址选项"""
+        current_text = self.remote_host_input.currentText().strip()
+        self.remote_host_input.blockSignals(True)
+        self.remote_host_input.clear()
+
+        if self.remote_mode_combo.currentText() == "主控端":
+            for ip in self.get_local_ipv4_addresses():
+                self.remote_host_input.addItem(ip)
+            if current_text and self.remote_host_input.findText(current_text) >= 0:
+                self.remote_host_input.setCurrentText(current_text)
+            elif self.remote_host_input.count() > 0:
+                self.remote_host_input.setCurrentIndex(0)
+        else:
+            if current_text:
+                self.remote_host_input.addItem(current_text)
+                self.remote_host_input.setCurrentText(current_text)
+            else:
+                self.remote_host_input.addItem("127.0.0.1")
+                self.remote_host_input.setCurrentText("127.0.0.1")
+
+        self.remote_host_input.blockSignals(False)
+
+    def toggle_remote_token_visibility(self, checked):
+        """显示或隐藏远程控制密码"""
+        self.remote_token_input.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+
     def toggle_serial_connection(self):
         """打开/关闭串口连接"""
+        if self.is_remote_client_active():
+            self.toggle_remote_serial_connection()
+            return
         if not self.is_connected:
             self.open_serial()
         else:
             self.close_serial()
+
+    def toggle_remote_control(self):
+        """启用/关闭远程控制"""
+        if self.remote_thread:
+            self.stop_remote_control()
+        else:
+            self.start_remote_control()
+
+    def start_remote_control(self):
+        """启动远程控制服务端或客户端"""
+        mode_text = self.remote_mode_combo.currentText()
+        host = self.remote_host_input.currentText().strip()
+        port = self.remote_port_spin.value()
+        token = self.remote_token_input.text()
+
+        if mode_text == "主控端":
+            self.remote_thread = RemoteControlServer("0.0.0.0", port, token)
+            self.remote_mode = "server"
+            selected_host = host or "本机全部地址"
+            self.output_manager.append_text(
+                f"主控端将监听端口 {port}。远程端可连接地址: {selected_host}",
+                OutputSource.SYSTEM
+            )
+            if not self.is_connected or not self.serial_thread:
+                self.output_manager.append_text("提示: 主控端当前未打开串口，远程端连接后需等待本机串口恢复", OutputSource.SYSTEM)
+        else:
+            if not host:
+                self.output_manager.append_text("错误: 请输入远程主控端地址", OutputSource.ERROR)
+                return
+            if self.is_connected:
+                self.output_manager.append_text("错误: 远程端模式下请先关闭本地串口", OutputSource.ERROR)
+                return
+            self.output_manager.append_text(f"正在连接远程主控端: {host}:{port}", OutputSource.SYSTEM)
+            self.remote_thread = RemoteControlClient(host, port, token)
+            self.remote_mode = "client"
+
+        self.remote_thread.data_received.connect(self.on_remote_data_received)
+        self.remote_thread.status_changed.connect(self.on_remote_status)
+        self.remote_thread.error_occurred.connect(self.on_remote_error)
+        self.remote_thread.connected_changed.connect(self.on_remote_connected_changed)
+        self.remote_thread.baudrate_requested.connect(self.on_remote_baudrate_requested)
+        self.remote_thread.serial_config_received.connect(self.on_remote_serial_config_received)
+        self.remote_thread.serial_control_requested.connect(self.on_remote_serial_control_requested)
+        self.remote_thread.start()
+
+        self.remote_toggle_btn.setText("关闭远程控制")
+        self._apply_button_color(self.remote_toggle_btn, Colors.RED_BUTTON)
+        self.remote_mode_combo.setEnabled(False)
+        self.remote_host_input.setEnabled(False)
+        self.remote_port_spin.setEnabled(False)
+        self.remote_token_input.setEnabled(False)
+        self.remote_show_token_check.setEnabled(False)
+        self._set_remote_status("远程: 启动中")
+
+    def stop_remote_control(self):
+        """停止远程控制"""
+        was_client = self.remote_mode == "client"
+        if self.remote_thread:
+            self.remote_thread.stop()
+            self.remote_thread = None
+        if was_client:
+            self.is_connected = False
+            self.connect_btn.setEnabled(True)
+            self.connect_btn.setText("打开串口")
+            self._apply_button_color(self.connect_btn, Colors.BLUE_BUTTON)
+        self.remote_mode = "off"
+        self.remote_client_connected = False
+        self.remote_serial_connected = False
+        self.remote_toggle_btn.setText("启用远程控制")
+        self._apply_button_color(self.remote_toggle_btn, Colors.BLUE_BUTTON)
+        self.remote_mode_combo.setEnabled(True)
+        self.remote_host_input.setEnabled(True)
+        self.remote_port_spin.setEnabled(True)
+        self.remote_token_input.setEnabled(True)
+        self.remote_show_token_check.setEnabled(True)
+        self.set_basic_group_remote_style(False)
+        self._set_remote_status("远程: 未启用")
+        self.output_manager.append_text("远程控制已关闭", OutputSource.SYSTEM)
+
+    def on_remote_status(self, message):
+        """远程控制状态消息"""
+        self._set_remote_status(f"远程: {message}")
+        self.output_manager.append_text(message, OutputSource.SYSTEM)
+
+    def on_remote_error(self, message, fatal=False):
+        """远程控制错误消息"""
+        self.output_manager.append_text(f"错误: {message}", OutputSource.ERROR)
+        if fatal and self.remote_mode == "client" and self.remote_thread:
+            self.stop_remote_control()
+
+    def on_remote_connected_changed(self, connected):
+        """远程连接状态变更"""
+        self.remote_client_connected = connected
+        if self.remote_mode == "client":
+            self.connect_btn.setEnabled(connected)
+            if not connected:
+                self.remote_serial_connected = False
+                self.update_connect_button_state(False)
+            self.set_basic_group_remote_style(connected)
+        elif self.remote_mode == "server" and connected:
+            self.send_remote_serial_config()
+        status = "已连接" if connected else ("监听中" if self.remote_mode == "server" else "未连接")
+        self._set_remote_status(f"远程: {status}")
+
+    def on_remote_data_received(self, data):
+        """远程端收到主控端串口回包，或主控端收到远程端发送数据"""
+        if self.remote_mode == "server":
+            sent_bytes = self._write_serial_data(data)
+            if sent_bytes > 0:
+                self.send_count += sent_bytes
+                self.update_statistics()
+                self.output_manager.reset_receive_timestamp()
+                if self.show_send_check.isChecked():
+                    self.output_manager.append_text(f"[远程发送 HEX]: {data.hex(' ').upper()}", OutputSource.SEND)
+            else:
+                self.output_manager.append_text("错误: 主控端本地串口未打开，无法转发远程数据", OutputSource.ERROR)
+                if self.remote_thread and self.remote_client_connected:
+                    self.remote_thread.send_error("主控端本地串口未打开，无法发送")
+        elif self.remote_mode == "client":
+            self.on_data_received(data)
+
+    def on_remote_baudrate_requested(self, baudrate):
+        """远程端请求主控端修改波特率"""
+        if self.remote_mode == "server":
+            self.update_baudrate(baudrate, notify_remote=False)
+
+    def on_remote_serial_control_requested(self, action, config):
+        """主控端处理远程打开/关闭本地串口请求"""
+        if self.remote_mode != "server":
+            return
+
+        if action == "open":
+            self.apply_serial_config_to_basic_settings(config)
+            self.output_manager.append_text("收到远程端打开串口请求", OutputSource.SYSTEM)
+            self.open_serial()
+            if self.is_connected and self.serial_thread:
+                self.remote_thread._queue_message({
+                    "type": "status",
+                    "message": "主控端打开串口"
+                })
+        elif action == "close":
+            self.output_manager.append_text("收到远程端关闭串口请求", OutputSource.SYSTEM)
+            if self.is_connected or self.serial_thread:
+                self.close_serial()
+            else:
+                self.send_remote_serial_config()
+                if self.remote_thread and self.remote_client_connected:
+                    self.remote_thread.send_error("主控端串口已处于关闭状态")
+        elif action == "refresh_ports":
+            self.output_manager.append_text("收到远程端刷新端口请求", OutputSource.SYSTEM)
+            self.refresh_ports()
+            self.send_remote_serial_config(include_ports=True)
+
+    def on_remote_serial_config_received(self, config):
+        """远程端应用主控端串口参数"""
+        if self.remote_mode != "client":
+            return
+        self.apply_remote_serial_config(config)
+
+    def get_current_serial_config(self, include_ports=False):
+        """获取当前基本设置中的串口参数"""
+        connected = self.remote_serial_connected if self.remote_mode == "client" else (
+            self.is_connected and self.serial_thread is not None
+        )
+        config = {
+            "port": self.port_combo.currentText(),
+            "baudrate": self.baud_combo.currentText(),
+            "databits": self.data_bits_combo.currentText(),
+            "parity": self.parity_combo.currentText(),
+            "stopbits": self.stop_bits_combo.currentText(),
+            "connected": connected
+        }
+        if include_ports:
+            config["ports"] = [
+                {
+                    "device": port.device,
+                    "description": port.description,
+                    "display": f"{port.device} - {port.description}"
+                }
+                for port in serial.tools.list_ports.comports()
+            ]
+        return config
+
+    def toggle_remote_serial_connection(self):
+        """远程端请求主控端打开或关闭本地串口"""
+        if not self.remote_thread or not self.remote_client_connected:
+            self.output_manager.append_text("错误: 远程串口未连接", OutputSource.ERROR)
+            return
+
+        if self.remote_serial_connected:
+            self.output_manager.append_text("主控端关闭串口", OutputSource.SYSTEM)
+            self.remote_thread.send_serial_control("close")
+        else:
+            self.output_manager.append_text("主控端打开串口", OutputSource.SYSTEM)
+            self.remote_thread.send_serial_control("open", self.get_current_serial_config())
+
+    def send_remote_serial_config(self, include_ports=False):
+        """主控端向远程端同步串口参数"""
+        if self.remote_mode == "server" and self.remote_thread and self.remote_client_connected:
+            self.remote_thread.send_serial_config(self.get_current_serial_config(include_ports=include_ports))
+
+    def apply_remote_serial_config(self, config):
+        """远程端显示主控端硬件串口参数"""
+        self.apply_remote_port_list(config)
+        self.apply_serial_config_to_basic_settings(config)
+        if self.remote_mode == "client":
+            self.remote_serial_connected = bool(config.get("connected", False))
+            self.connect_btn.setEnabled(self.remote_client_connected)
+            self.update_connect_button_state(self.remote_serial_connected)
+        self.set_basic_group_remote_style(True)
+
+    def apply_remote_port_list(self, config):
+        """远程端应用主控端扫描到的端口列表"""
+        ports = config.get("ports")
+        if not isinstance(ports, list):
+            return
+
+        current_text = self.port_combo.currentText()
+        self.port_combo.blockSignals(True)
+        self.port_combo.clear()
+        for port in ports:
+            if isinstance(port, dict):
+                display = port.get("display") or port.get("device") or ""
+            else:
+                display = str(port)
+            if display:
+                self.port_combo.addItem(display)
+
+        target_port = str(config.get("port", ""))
+        if target_port and self.port_combo.findText(target_port) >= 0:
+            self.port_combo.setCurrentText(target_port)
+        elif target_port:
+            for index in range(self.port_combo.count()):
+                if self.port_combo.itemText(index).split(" ")[0] == target_port.split(" ")[0]:
+                    self.port_combo.setCurrentIndex(index)
+                    break
+            else:
+                self.port_combo.addItem(target_port)
+                self.port_combo.setCurrentText(target_port)
+        elif current_text and self.port_combo.findText(current_text) >= 0:
+            self.port_combo.setCurrentText(current_text)
+        self.port_combo.blockSignals(False)
+
+    def update_connect_button_state(self, connected):
+        """按连接状态刷新打开/关闭串口按钮"""
+        self.connect_btn.setText("关闭串口" if connected else "打开串口")
+        self.connect_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.RED_BUTTON if connected else Colors.BLUE_BUTTON};
+                color: white;
+            }}
+        """)
+
+    def is_remote_client_active(self):
+        """远程端虚拟基本设置状态：只向主控端发送控制，不操作本机串口"""
+        return self.remote_mode == "client" and self.remote_thread is not None and self.remote_client_connected
+
+    def can_send_serial_data(self):
+        """当前后端是否允许发送串口数据"""
+        if self.is_remote_client_active():
+            return self.remote_serial_connected
+        return self.is_connected and self.serial_thread is not None
+
+    def apply_serial_config_to_basic_settings(self, config):
+        """将串口配置写入基本设置控件"""
+        port = str(config.get("port", ""))
+        if port:
+            if self.port_combo.findText(port) < 0:
+                self.port_combo.addItem(port)
+            self.port_combo.setCurrentText(port)
+        self.baud_combo.setCurrentText(str(config.get("baudrate", "115200")))
+        self.data_bits_combo.setCurrentText(str(config.get("databits", "8")))
+        self.parity_combo.setCurrentText(str(config.get("parity", "None")))
+        self.stop_bits_combo.setCurrentText(str(config.get("stopbits", "1")))
+
+    def set_basic_group_remote_style(self, remote_active):
+        """远程端连接时标记基本设置来自主控端硬件"""
+        if remote_active:
+            self.basic_group.setTitle("基本设置 (主控端信息)")
+            self.basic_group.content_widget.setStyleSheet("""
+                #content_widget {
+                    border: 1px solid #7aa7d9;
+                    border-radius: 6px;
+                    background-color: #eef6ff;
+                }
+            """)
+            self.basic_group.toggle_button.setToolTip("远程端模式：基本设置显示主控端硬件串口参数")
+        else:
+            self.basic_group.setTitle("基本设置")
+            self.basic_group.content_widget.setStyleSheet("""
+                #content_widget {
+                    border: 1px solid #d0d0d0;
+                    border-radius: 6px;
+                    background-color: white;
+                }
+            """)
+            self.basic_group.toggle_button.setToolTip("")
+
+    def _set_remote_status(self, text):
+        self.remote_status_label.setText(text)
+
+    def _write_serial_data(self, data):
+        """向当前连接后端写入原始字节"""
+        if self.remote_mode == "client":
+            if self.remote_thread and self.remote_client_connected:
+                self.remote_thread.send_serial_data(data)
+                return len(data)
+            return 0
+        if self.serial_thread:
+            return self.serial_thread.write_data(data)
+        return 0
 
     def open_serial(self):
         """打开串口"""
@@ -737,6 +1205,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 }}
             """)
             self.output_manager.append_text("串口已打开", OutputSource.SYSTEM) 
+            self.send_remote_serial_config()
 
         except Exception as e:
             error_str = str(e)
@@ -767,9 +1236,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             }}
         """)
         self.output_manager.append_text("串口已关闭", OutputSource.SYSTEM)
+        self.send_remote_serial_config()
 
     def on_data_received(self, data):
         """接收数据回调"""
+        if self.remote_mode == "server" and self.remote_thread and self.remote_client_connected:
+            self.remote_thread.send_serial_data(data)
         try:
             text = data.decode('utf-8')
             self.receive_count += len(data)
@@ -838,7 +1310,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def send_command(self, command, row_index=None):
         """发送命令"""
-        if not self.is_connected or not self.serial_thread:
+        if not self.can_send_serial_data():
             self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
             if self.is_continuous_sending:
                 self.stop_continuous_sending()
@@ -850,7 +1322,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             full_command = command.encode('utf-8') + ending
 
             # 发送数据
-            sent_bytes = self.serial_thread.write_data(full_command)
+            sent_bytes = self._write_serial_data(full_command)
             if sent_bytes > 0:
                 self.send_count += sent_bytes
                 self.update_statistics()
@@ -907,11 +1379,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def send_raw_data(self, data):
         """发送原始字节数据 (供特殊指令使用) """
-        if not self.is_connected or not self.serial_thread:
+        if not self.can_send_serial_data():
             self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
             return False
             
-        sent_bytes = self.serial_thread.write_data(data)
+        sent_bytes = self._write_serial_data(data)
         if sent_bytes > 0:
             self.send_count += sent_bytes
             self.update_statistics()
@@ -921,16 +1393,46 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return True
         return False
 
-    def update_baudrate(self, baudrate):
+    def update_baudrate(self, baudrate, notify_remote=True):
         """更新波特率 (供特殊指令使用) """
         self.baud_combo.setCurrentText(str(baudrate))
+        self.save_state()
+        if self.remote_mode == "client" and notify_remote:
+            if self.remote_thread and self.remote_client_connected:
+                self.remote_thread.send_baudrate(baudrate)
+                self.output_manager.append_text(f"已请求远程主控端调整波特率至: {baudrate}", OutputSource.SYSTEM)
+            else:
+                self.output_manager.append_text("调整波特率失败: 远程串口未连接", OutputSource.ERROR)
+            return
         if self.is_connected and self.serial_thread:
             # 动态调整波特率，无需关闭串口
             self.output_manager.append_text(f"正在调整波特率至: {baudrate}", OutputSource.SYSTEM)
             if self.serial_thread.set_baudrate(baudrate):
-                self.output_manager.append_text(f"波特率已更新为: {baudrate}", OutputSource.SYSTEM)
+                self.output_manager.append_text(output_rules.baudrate_updated(baudrate), OutputSource.SYSTEM)
+                self.send_remote_serial_config()
             else:
                 self.output_manager.append_text(f"调整波特率失败", OutputSource.ERROR)
+
+    def update_com_port(self, port):
+        """更新 COM 口 (供特殊指令和 CLI 配置复用) """
+        port_id = port.strip().split(" ")[0]
+        if not port_id:
+            self.output_manager.append_text("错误: COM口不能为空", OutputSource.ERROR)
+            return False
+
+        matched = False
+        for index in range(self.port_combo.count()):
+            if self.port_combo.itemText(index).split(" ")[0] == port_id:
+                self.port_combo.setCurrentIndex(index)
+                matched = True
+                break
+        if not matched:
+            self.port_combo.addItem(port_id)
+            self.port_combo.setCurrentText(port_id)
+
+        self.save_state()
+        self.output_manager.append_text(output_rules.comport_updated(port_id), OutputSource.SYSTEM)
+        return True
 
     def set_ending(self, ending_text):
         """设置结尾标识符 (供特殊指令使用) """
@@ -945,14 +1447,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         index = self.ending_combo.findText(target)
         if index >= 0:
             self.ending_combo.setCurrentIndex(index)
-            self.output_manager.append_text(f"已设置结尾标识符为: {target}", OutputSource.SYSTEM)
+            self.output_manager.append_text(output_rules.ending_set(target), OutputSource.SYSTEM)
             return
 
         for i in range(self.ending_combo.count()):
             item_text = self.ending_combo.itemText(i)
             if item_text == target or item_text.replace(r"\r", "\r").replace(r"\n", "\n") == target:
                 self.ending_combo.setCurrentIndex(i)
-                self.output_manager.append_text(f"已设置结尾标识符为: {item_text}", OutputSource.SYSTEM)
+                self.output_manager.append_text(output_rules.ending_set(item_text), OutputSource.SYSTEM)
                 return
 
         self.output_manager.append_text(f"错误: 不支持的结尾标识符: {ending_text}", OutputSource.ERROR)
@@ -1002,7 +1504,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def start_continuous_send(self):
         """开始连续发送"""
-        if not self.is_connected:
+        if not self.can_send_serial_data():
             self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
             return
 
@@ -1108,18 +1610,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 if command_type == SpecialCommandType.DELAY:
                     try:
                         delay_ms = float(param.strip())
-                        self.output_manager.append_text(f"连续发送延迟: {delay_ms}ms", OutputSource.SYSTEM)
+                        self.output_manager.append_text(output_rules.continuous_delay(delay_ms), OutputSource.SYSTEM)
                         QTimer.singleShot(int(delay_ms), lambda: send_next_command(index + 1))
                         return
                     except ValueError:
-                        self.output_manager.append_text(f"错误: 无效的延迟参数: {param}", OutputSource.ERROR)
+                        self.output_manager.append_text(output_rules.invalid_delay(param), OutputSource.ERROR)
                 elif command_type == SpecialCommandType.SENDHEX:
                     # 执行 SendHex 指令
                     if self.special_command_manager.execute(command_type, param, self):
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     else:
                         # 执行失败时记录错误并继续下一条，不中断连续发送
-                        self.output_manager.append_text(f"错误: SendHex 执行失败: {param}", OutputSource.ERROR)
+                        self.output_manager.append_text(
+                            output_rules.special_command_failed("SendHex", param),
+                            OutputSource.ERROR,
+                        )
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
                 elif command_type == SpecialCommandType.BAUDRATE:
@@ -1128,7 +1633,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         # 波特率切换可能导致串口重启，等待 500ms 确保稳定
                         QTimer.singleShot(500, lambda: send_next_command(index + 1))
                     else:
-                        self.output_manager.append_text(f"错误: BaudRate 执行失败: {param}", OutputSource.ERROR)
+                        self.output_manager.append_text(
+                            output_rules.special_command_failed("BaudRate", param),
+                            OutputSource.ERROR,
+                        )
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
                 elif command_type == SpecialCommandType.SETENDLOG:
@@ -1136,7 +1644,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     if self.special_command_manager.execute(command_type, param, self):
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     else:
-                        self.output_manager.append_text(f"错误: SetEndlog 执行失败: {param}", OutputSource.ERROR)
+                        self.output_manager.append_text(
+                            output_rules.special_command_failed("SetEndlog", param),
+                            OutputSource.ERROR,
+                        )
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
                 elif command_type == SpecialCommandType.SENDMODE:
@@ -1267,6 +1778,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """创建可取消的进度弹窗"""
         progress = QProgressDialog(title, "取消", 0, maximum, self)
         progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowFlags(progress.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         progress.setMinimumDuration(0)
         progress.setAutoClose(True)
         progress.setAutoReset(True)
@@ -1575,11 +2087,18 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         try:
             state = OrderedDict([
                 ("basic_settings", {
-                    "port": self.port_combo.currentText(),
+                    "port": self.get_selected_port_id(),
+                    "port_node": self.get_selected_port_node(),
                     "baudrate": self.baud_combo.currentText(),
                     "databits": self.data_bits_combo.currentText(),
                     "parity": self.parity_combo.currentText(),
                     "stopbits": self.stop_bits_combo.currentText()
+                }),
+                ("remote_settings", {
+                    "mode": self.remote_mode_combo.currentText(),
+                    "host": self.remote_host_input.currentText(),
+                    "port": self.remote_port_spin.value(),
+                    "token": self.remote_token_input.text()
                 }),
                 ("receive_settings", {
                     "show_send_source": self.show_send_source_check.isChecked(),
@@ -1604,18 +2123,26 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     "h_splitter_sizes": self.h_splitter.sizes()
                 }),
                 ("tool_settings", {
-                    "tools_group_expanded": self.tools_group.isExpanded()
+                    "left_group_expanded": {
+                        "basic": self.basic_group.isExpanded(),
+                        "remote": self.remote_group.isExpanded(),
+                        "receive": self.receive_group.isExpanded(),
+                        "send": self.send_group.isExpanded(),
+                        "other": self.other_group.isExpanded(),
+                        "template": self.template_group.isExpanded(),
+                        "tools": self.tools_group.isExpanded()
+                    }
                 }),
                 ("commands", self.command_table.get_all_commands())
             ])
-            self.config_manager.set("last_state", state)
+            self.config_manager.set("state", state)
         except Exception as e:
             print(f"保存状态失败: {e}")
 
     def load_state(self):
         """从配置文件加载状态"""
         try:
-            state = self.config_manager.get("last_state")
+            state = self.config_manager.get("state") or self.config_manager.get("last_state")
             if not state:
                 # 兼容旧版本配置 (如果存在)
                 self._load_legacy_state()
@@ -1624,14 +2151,28 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 1. 基本设置
             basic_settings = state.get("basic_settings") or state.get("serial_settings", {})
             port = basic_settings.get("port")
-            if port and self.port_combo.findText(port) >= 0:
-                self.port_combo.setCurrentText(port)
+            port_node = basic_settings.get("port_node") or port
+            if port_node and self.port_combo.findText(port_node) >= 0:
+                self.port_combo.setCurrentText(port_node)
+            elif port:
+                for index in range(self.port_combo.count()):
+                    if self.port_combo.itemText(index).split(" ")[0] == port:
+                        self.port_combo.setCurrentIndex(index)
+                        break
             self.baud_combo.setCurrentText(basic_settings.get("baudrate", "115200"))
             self.data_bits_combo.setCurrentText(basic_settings.get("databits", "8"))
             self.parity_combo.setCurrentText(basic_settings.get("parity", "None"))
             self.stop_bits_combo.setCurrentText(basic_settings.get("stopbits", "1"))
 
-            # 2. 接收设置
+            # 2. 远程控制设置
+            remote_settings = state.get("remote_settings", {})
+            self.remote_mode_combo.setCurrentText(remote_settings.get("mode", "主控端"))
+            self.update_remote_host_options()
+            self.remote_host_input.setCurrentText(remote_settings.get("host", "127.0.0.1"))
+            self.remote_port_spin.setValue(remote_settings.get("port", 8765))
+            self.remote_token_input.setText(remote_settings.get("token", ""))
+
+            # 3. 接收设置
             receive_settings = state.get("receive_settings")
             if receive_settings:
                 self.show_send_source_check.setChecked(receive_settings.get("show_send_source", True))
@@ -1646,7 +2187,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.show_sys_source_check.setChecked(old_send_settings.get("show_sys_source", True))
                 self.show_err_source_check.setChecked(old_send_settings.get("show_err_source", True))
 
-            # 3. 发送设置
+            # 4. 发送设置
             send_settings = state.get("send_settings", {})
             self.loop_send_check.setChecked(send_settings.get("loop_send", False))
             self.loop_interval_spin.setValue(send_settings.get("loop_interval", 1000))
@@ -1655,19 +2196,36 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.send_color_combo.setCurrentText(send_settings.get("send_color", "红色"))
             self.ending_combo.setCurrentText(send_settings.get("ending", r"\r\n"))
             
-            # 4. 其他设置
+            # 5. 其他设置
             other_settings = state.get("other_settings", {})
             self.timestamp_check.setChecked(other_settings.get("show_timestamp", False))
 
-            # 5. UI 设置
+            # 6. UI 设置
             ui_settings = state.get("ui_settings") or state.get("ui_state", {})
             h_sizes = ui_settings.get("h_splitter_sizes")
             if h_sizes:
                 self.h_splitter.setSizes(h_sizes)
             
-            # 6. 工具设置
+            # 7. 工具设置
             tool_settings = state.get("tool_settings") or state.get("ui_state", {})
-            self.tools_group.setExpanded(tool_settings.get("tools_group_expanded", False))
+            default_left_expanded = {
+                "basic": True,
+                "remote": False,
+                "receive": True,
+                "send": True,
+                "other": True,
+                "template": True,
+                "tools": tool_settings.get("tools_group_expanded", False)
+            }
+            left_group_expanded = default_left_expanded.copy()
+            left_group_expanded.update(tool_settings.get("left_group_expanded", {}))
+            self.basic_group.setExpanded(left_group_expanded.get("basic", True))
+            self.remote_group.setExpanded(left_group_expanded.get("remote", False))
+            self.receive_group.setExpanded(left_group_expanded.get("receive", True))
+            self.send_group.setExpanded(left_group_expanded.get("send", True))
+            self.other_group.setExpanded(left_group_expanded.get("other", True))
+            self.template_group.setExpanded(left_group_expanded.get("template", True))
+            self.tools_group.setExpanded(left_group_expanded.get("tools", False))
 
             # 加载命令
             saved_commands = state.get("commands")
@@ -1728,10 +2286,26 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             port = self.config_manager.get("port")
             if port and self.port_combo.findText(port) >= 0:
                 self.port_combo.setCurrentText(port)
+            elif port:
+                for index in range(self.port_combo.count()):
+                    if self.port_combo.itemText(index).split(" ")[0] == port:
+                        self.port_combo.setCurrentIndex(index)
+                        break
             self.baud_combo.setCurrentText(self.config_manager.get("baudrate", "115200"))
             self.data_bits_combo.setCurrentText(self.config_manager.get("databits", "8"))
             self.parity_combo.setCurrentText(self.config_manager.get("parity", "None"))
             self.stop_bits_combo.setCurrentText(self.config_manager.get("stopbits", "1"))
+            self.remote_mode_combo.setCurrentText("主控端")
+            self.update_remote_host_options()
+            self.remote_host_input.setCurrentText("127.0.0.1")
+            self.remote_port_spin.setValue(8765)
+            self.basic_group.setExpanded(True)
+            self.remote_group.setExpanded(False)
+            self.receive_group.setExpanded(True)
+            self.send_group.setExpanded(True)
+            self.other_group.setExpanded(True)
+            self.template_group.setExpanded(True)
+            self.tools_group.setExpanded(False)
             
             self.timestamp_check.setChecked(self.config_manager.get("show_timestamp", False))
 
@@ -1755,5 +2329,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def closeEvent(self, event):
         """对话框关闭事件"""
+        if self.remote_thread:
+            self.stop_remote_control()
         self.save_state()
         event.accept()

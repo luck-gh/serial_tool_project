@@ -119,23 +119,44 @@ mv GHowe串口助手 MySerialTool
 
 ## 命令行参数
 
-当前版本不支持命令行参数，所有配置通过配置文件或 GUI 界面管理。
-
-### 未来计划支持的参数
+当前版本支持 CLI 模式，可直接使用配置文件中的 `state.basic_settings` 打开串口并发送命令。
 
 ```bash
-# 指定配置文件 (计划中)
-python -m serial_tool_project.main --config custom_config.json
+# 发送普通字符串
+python main.py --cli --send "AT"
 
-# 指定串口 (计划中)
-python -m serial_tool_project.main --port COM3 --baud 115200
+# 打包后使用同一个 exe
+GHowe_串口调试助手.exe --cli --send "AT"
 
-# 自动执行命令文件 (计划中)
-python -m serial_tool_project.main --run commands.csv
+# 发送十六进制
+python main.py --cli --send "SendHex:AA 55 01"
 
-# 静默模式 (计划中)
-python -m serial_tool_project.main --silent
+# 修改配置中的 COM 口
+python main.py --cli --port COM5
+
+# 使用特殊命令修改配置中的 COM 口或波特率
+python main.py --cli --send "ComPort:COM5"
+python main.py --cli --send "BaudRate:115200"
+
+# 按配置文件 state.commands 中的模块发送
+python main.py --cli --send "Mode:初始化"
+python main.py --cli --send "SendMode:初始化"
+
+# 指定配置文件
+python main.py --cli --config custom_config.json --send "AT"
 ```
+
+CLI 输出会读取配置文件中的显示设置:
+
+- `state.receive_settings.show_send_source`
+- `state.receive_settings.show_recv_source`
+- `state.receive_settings.show_sys_source`
+- `state.receive_settings.show_err_source`
+- `state.send_settings.show_send`
+- `state.send_settings.send_color`
+- `state.other_settings.show_timestamp`
+
+发送时不再输出字节统计. 如果启用了 `show_send`, CLI 会按发送颜色显示发送内容, 然后打印串口接收数据.
 
 ---
 
@@ -167,9 +188,10 @@ python -m serial_tool_project.main --silent
     }
   },
   "last_used_directory": "D:/Projects/",
-  "last_state": {
+  "state": {
     "basic_settings": {
       "port": "COM3",
+      "port_node": "COM3 - USB-SERIAL CH340",
       "baudrate": 115200,
       "databits": 8,
       "parity": "None",
@@ -349,7 +371,7 @@ exe = EXE(
     upx=True,  # 启用 UPX 压缩
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # 隐藏控制台
+    console=True,  # 单 exe 同时支持 GUI 和 CLI 输出
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -414,6 +436,8 @@ hdiutil create -volname "GHowe串口助手" -srcfolder dist -ov -format UDZO GHo
 
 - 校验 `README.md` 版本号
 - 校验 `main.py` 中的 `TOOL_VERSION`
+- Checkout 同一 GitHub 用户/组织下的三个工具仓库:
+  `number_converter_project`, `bin_hex_converter_project`, `firmware_downloader_project`
 - 使用 `main.spec` 执行 PyInstaller 打包
 - 创建 GitHub Release
 - 上传 exe 到 Release
@@ -421,12 +445,29 @@ hdiutil create -volname "GHowe串口助手" -srcfolder dist -ov -format UDZO GHo
 #### 发布命令示例
 
 ```bash
+# 1. 本地校验版本一致性
+python .github/scripts/validate_serial_tool_release.py v1.1.5 README.md main.py
+
+# 2. 提交并推送源码
 git add .
 git commit -m "release: v1.1.5"
-git tag v1.1.5
 git push origin master
+
+# 3. 创建并推送版本标签，触发 GitHub Actions 自动发布
+git tag v1.1.5
 git push origin v1.1.5
 ```
+
+#### VSCode 推送说明
+
+VSCode 的普通“推送”按钮通常只会推送当前分支，不会自动推送 tag。普通推送完成后，还需要执行：
+
+```bash
+git tag v1.1.5
+git push origin v1.1.5
+```
+
+也可以使用 VSCode 命令面板中的 `Git: Push Tags` 推送版本标签。
 
 #### 常见失败原因
 
@@ -476,19 +517,29 @@ pip install -r requirements.txt
 python -m serial_tool_project.main
 ```
 
-### 开发环境变量
+### 打包环境变量
 
-#### BUNDLE_CALC (计划中)
+`main.spec` 会自动检测主工程同级目录下的三个工具项目。目录存在时默认打包, 目录不存在时自动跳过。也可以用环境变量强制启用或禁用。
 
-控制是否打包进制转换器:
+| 环境变量 | 控制项目 | 默认行为 |
+|----------|----------|----------|
+| `BUNDLE_NUMBER_CONVERTER` | `number_converter_project` | 同级目录存在则打包 |
+| `BUNDLE_BIN_HEX_CONVERTER` | `bin_hex_converter_project` | 同级目录存在则打包 |
+| `BUNDLE_FIRMWARE_DOWNLOADER` | `firmware_downloader_project` | 同级目录存在则打包 |
+
+变量值支持 `1`, `true`, `yes`, `on` 表示启用, 支持 `0`, `false`, `no`, `off` 表示禁用。
 
 ```bash
 # Windows
-set BUNDLE_CALC=1
+set BUNDLE_NUMBER_CONVERTER=1
+set BUNDLE_BIN_HEX_CONVERTER=1
+set BUNDLE_FIRMWARE_DOWNLOADER=1
 pyinstaller main.spec
 
 # Linux/macOS
-export BUNDLE_CALC=1
+export BUNDLE_NUMBER_CONVERTER=1
+export BUNDLE_BIN_HEX_CONVERTER=1
+export BUNDLE_FIRMWARE_DOWNLOADER=1
 pyinstaller main.spec
 ```
 

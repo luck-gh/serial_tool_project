@@ -23,35 +23,34 @@
 
 ```
 serial_tool_project/
-├── main.py                          # 应用程序主入口 (38 行)
-├── main_window.py                   # 主窗口 UI 和核心逻辑 (~1500 行)
+├── main.py                          # 应用程序主入口, 负责 GUI/CLI 启动分流
+├── main_window.py                   # 主窗口 UI 和核心交互逻辑
 ├── main.spec                        # PyInstaller 打包配置
 ├── main_config.json                 # 应用程序配置文件 (自动生成)
 ├── resources/                       # 资源文件
 │   └── HOWE_LOGO.ico               # 应用程序图标
 ├── core/                            # 核心功能模块
 │   ├── __init__.py
-│   ├── README.md
+│   ├── cli_runner.py               # CLI 模式入口和命令执行
+│   ├── command_executor.py         # GUI/CLI 共用的命令模块解析
+│   ├── output_rules.py             # GUI/CLI 共用的输出规则和文案
+│   ├── remote_control.py           # 局域网远程串口控制
 │   └── serial_thread.py            # 串口通信线程
 ├── managers/                        # 功能管理模块
 │   ├── __init__.py
-│   ├── README.md
 │   ├── config_manager.py           # 配置管理器 (工具注册表)
-│   ├── output_manager.py           # 输出管理器 (日志分类过滤)
+│   ├── output_manager.py           # Qt 接收区输出写入器
 │   └── special_command_manager.py  # 特殊指令管理器
 ├── widgets/                         # 自定义 UI 控件
 │   ├── __init__.py
-│   ├── README.md
 │   ├── base_widgets.py             # 基础控件混入类
 │   ├── custom_widgets.py           # 自定义控件库
 │   └── command_widgets.py          # 命令表格控件
 ├── utils/                           # 辅助工具和 UI 样式
 │   ├── __init__.py
-│   ├── README.md
 │   └── ui_utils.py                 # UI 工具类、枚举、颜色常量
 ├── dialogs/                         # 交互对话框
 │   ├── __init__.py
-│   ├── README.md
 │   ├── config_dialog.py            # 配置对话框 (工具设置)
 │   └── comment_edit_dialog.py      # 注释编辑对话框
 └── docs/                            # 文档目录
@@ -59,15 +58,6 @@ serial_tool_project/
     ├── COMMAND_LINE_USAGE.md       # 命令行使用指南
     └── DEVELOPER_NOTES.md          # 开发者笔记 (本文档)
 ```
-
-### 代码统计
-
-- **总代码行数**: ~3,300 行 Python 代码
-- **核心模块**: 12 个 Python 文件
-- **自定义控件**: 5+ 个
-- **管理器模块**: 3 个
-
----
 
 ## 核心设计原则
 
@@ -193,7 +183,7 @@ def execute_sendmode_inline(self, module_name, context, completion_callback=None
     }
   },
   "last_used_directory": "D:/Projects/",
-  "last_state": {
+  "state": {
     "basic_settings": {...},
     "receive_settings": {...},
     "send_settings": {...},
@@ -202,6 +192,8 @@ def execute_sendmode_inline(self, module_name, context, completion_callback=None
   }
 }
 ```
+
+`last_state` 是旧版本字段, 加载配置时会自动迁移为 `state`。
 
 #### 版本兼容性机制
 
@@ -266,222 +258,81 @@ main_window.py (主窗口)
 
 ## 模块详解
 
-### 1. core/serial_thread.py
+本节替代原来各目录下的 README, 用于集中说明目录职责和每个 Python 文件的职责边界。目录级 README 不再维护, 避免说明分散和过期。
 
-**职责**: 异步串口通信
+### 顶层入口
 
-#### 关键类
+| 文件 | 职责 |
+|------|------|
+| `main.py` | 应用程序主入口, 根据启动参数进入 GUI 模式或 CLI 模式, 并维护工具版本信息。 |
+| `main_window.py` | GUI 主窗口, 负责界面布局, 串口操作, 远程控制协调, 命令发送流程和状态保存。 |
 
-```python
-class SerialThread(QThread):
-    """串口通信线程"""
+### core
 
-    # 信号定义
-    data_received = pyqtSignal(bytes)  # 接收到数据
-    error_occurred = pyqtSignal(str)   # 发生错误
+`core/` 放置可被 GUI 或 CLI 复用的核心能力, 尽量不直接依赖具体界面控件。
 
-    def __init__(self, port, baudrate, ...):
-        self.serial_port = serial.Serial(...)
-        self.running = True
+| 文件 | 职责 |
+|------|------|
+| `core/serial_thread.py` | 后台串口线程, 负责串口打开, 读取, 写入, 波特率切换和错误信号上报。 |
+| `core/remote_control.py` | 局域网远程控制通信层, 实现主控端和远程端的 TCP JSON 消息交互。 |
+| `core/cli_runner.py` | CLI 模式执行器, 负责命令行参数, 配置读取, 串口发送, 模块执行和 CLI 输出。 |
+| `core/command_executor.py` | 命令序列解析器, 将 GUI 表格或配置文件中的命令统一解析为可执行模块命令。 |
+| `core/output_rules.py` | 输出策略中心, 统一管理输出过滤, 时间戳, 颜色, ANSI 映射和共享提示文案。 |
 
-    def run(self):
-        """线程主循环"""
-        while self.running:
-            if self.serial_port.in_waiting:
-                data = self.serial_port.read(...)
-                self.data_received.emit(data)
+### managers
 
-    def write(self, data):
-        """发送数据"""
-        self.serial_port.write(data)
+`managers/` 放置面向应用流程的管理类, 通常由主窗口持有并调用。
 
-    def stop(self):
-        """停止线程"""
-        self.running = False
-        self.serial_port.close()
-```
+| 文件 | 职责 |
+|------|------|
+| `managers/config_manager.py` | 配置管理器, 负责 JSON 配置加载保存, 版本检查, 旧字段迁移和工具注册表默认值补齐。 |
+| `managers/output_manager.py` | Qt 输出写入器, 负责把分类后的输出文本按 `OutputRules` 写入接收显示区。 |
+| `managers/special_command_manager.py` | 特殊指令管理器, 负责 GUI 流程中的 `delay`, `SendHex`, `BaudRate`, `ComPort`, `SetEndlog`, `SendMode`, `StopContinuous` 执行。 |
 
-#### 设计要点
+### widgets
 
-- **多线程安全**: 使用 QThread，不阻塞 UI
-- **信号机制**: 通过 pyqtSignal 与主线程通信
-- **异常处理**: 捕获串口异常，通过信号通知主窗口
+`widgets/` 放置可复用的 PyQt 控件和控件混入逻辑。
 
-### 2. managers/config_manager.py
+| 文件 | 职责 |
+|------|------|
+| `widgets/custom_widgets.py` | 通用自定义控件, 包括接收区文本浏览器, 可折叠分组框和可点击下拉框。 |
+| `widgets/command_widgets.py` | 命令表格相关控件, 负责命令输入框, 注释显示, 行编辑, 特殊命令菜单和批量操作。 |
+| `widgets/base_widgets.py` | 基础控件混入类, 负责外部工具启动, 进制转换器调用和跨控件复用逻辑。 |
 
-**职责**: 配置管理、工具注册表、版本兼容
+### dialogs
 
-#### 关键方法
+`dialogs/` 放置独立对话框, 不承担主业务状态管理。
 
-```python
-class ConfigManager:
-    # 工具注册表 (类变量)
-    REGISTERED_TOOLS = {...}
+| 文件 | 职责 |
+|------|------|
+| `dialogs/config_dialog.py` | 工具配置对话框, 负责外部工具路径, 启用状态和工具参数设置。 |
+| `dialogs/comment_edit_dialog.py` | 命令注释编辑对话框, 提供多行注释编辑界面。 |
 
-    def __init__(self, tool_version, tool_version_date, config_file):
-        self.config_file = config_file
-        self.load_config()
+### utils
 
-    def load_config(self):
-        """加载配置，自动迁移"""
-        # 读取配置文件
-        # 检测版本
-        # 自动迁移
-        # 补充默认值
+`utils/` 放置轻量公共工具, 避免依赖主窗口或管理器。
 
-    def save_config(self, config_data):
-        """保存配置"""
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            json.dump(config_data, f, indent=2, ensure_ascii=False)
+| 文件 | 职责 |
+|------|------|
+| `utils/ui_utils.py` | UI 通用定义, 包括输出来源枚举, 特殊命令枚举, 颜色常量, 资源路径和特殊命令解析函数。 |
 
-    def get_tool_config(self, tool_key):
-        """获取工具配置"""
-        return self.config.get("tools", {}).get(tool_key, {})
+### 输出相关边界
 
-    def update_tool_config(self, tool_key, config):
-        """更新工具配置"""
-        self.config["tools"][tool_key] = config
-        self.save_config(self.config)
-```
+| 模块 | 职责边界 |
+|------|----------|
+| `core/output_rules.py` | 决定某类输出是否显示, 使用什么颜色, 是否加时间戳, 以及共享文案内容。 |
+| `managers/output_manager.py` | 只负责把文本写入 Qt 控件, 不新增业务文案规则。 |
+| `core/cli_runner.py::CliOutput` | 只负责把文本写入 stdout/stderr, 复用 `OutputRules`。 |
 
-#### 设计要点
+### 命令执行相关边界
 
-- **工具注册表** - 集中管理所有工具的默认配置
-- **版本检测** - 拒绝加载版本过高的配置
-- **自动迁移** - 自动补充缺失字段
-- **增量保存** - 按需写入文件
-
-### 3. managers/special_command_manager.py
-
-**职责**: 解析和执行特殊指令
-
-#### 关键方法
-
-```python
-class SpecialCommandManager:
-    def __init__(self, config_manager):
-        self.config_manager = config_manager
-
-    def is_special_command(self, command):
-        """判断是否为特殊指令"""
-        return (command.startswith("delay:") or
-                command.startswith("SendHex:") or
-                ...)
-
-    def parse_command(self, command):
-        """解析特殊指令"""
-        if command.startswith("delay:"):
-            return ("delay", int(command[6:]))
-        elif command.startswith("SendHex:"):
-            return ("SendHex", command[8:])
-        # ...
-
-    def execute_delay(self, ms, callback):
-        """执行延迟指令"""
-        QTimer.singleShot(ms, callback)
-
-    def execute_sendmode(self, module_name, context, completion_callback):
-        """执行模块跳转"""
-        # 递归发送模块内的命令
-        # 完成后调用 completion_callback
-```
-
-#### 设计要点
-
-- **非阻塞执行** - 使用 QTimer 实现异步
-- **回调机制** - 通过回调通知执行完成
-- **上下文传递** - 通过 context 参数传递必要信息
-
-### 4. widgets/custom_widgets.py
-
-**职责**: 自定义 UI 控件
-
-#### 关键控件
-
-**CollapsibleGroupBox** - 可折叠分组框
-
-```python
-class CollapsibleGroupBox(QWidget):
-    """可折叠的 QGroupBox"""
-
-    def __init__(self, title, parent=None):
-        self.toggle_button = QPushButton(title)
-        self.content_area = QWidget()
-        self.collapsed = False
-
-        self.toggle_button.clicked.connect(self.toggle)
-
-    def toggle(self):
-        """切换折叠状态"""
-        self.collapsed = not self.collapsed
-        self.content_area.setVisible(not self.collapsed)
-```
-
-**CustomTextBrowser** - 自定义文本浏览器
-
-```python
-class CustomTextBrowser(QTextBrowser):
-    """支持右键菜单的文本浏览器"""
-
-    def contextMenuEvent(self, event):
-        """右键菜单"""
-        menu = QMenu(self)
-        copy_action = menu.addAction("复制")
-        clear_action = menu.addAction("清空")
-        # ...
-        menu.exec_(event.globalPos())
-```
-
-#### 设计要点
-
-- **继承扩展** - 继承 Qt 控件并扩展功能
-- **信号槽** - 使用 Qt 信号槽机制
-- **样式定制** - 支持自定义样式
-
-### 5. managers/output_manager.py
-
-**职责**: 输出管理、日志分类、过滤
-
-#### 关键方法
-
-```python
-class OutputManager:
-    def __init__(self, text_browser):
-        self.text_browser = text_browser
-        self.filters = {
-            OutputSource.SEND: True,
-            OutputSource.RECEIVE: True,
-            OutputSource.SYSTEM: True,
-            OutputSource.ERROR: True
-        }
-
-    def append_output(self, text, source, show_timestamp=False):
-        """添加输出"""
-        if not self.filters.get(source, True):
-            return  # 过滤掉不显示的输出
-
-        color = self.get_color(source)
-        timestamp = self.get_timestamp() if show_timestamp else ""
-
-        self.text_browser.append(f"{timestamp}[{source.value}] {text}")
-
-    def set_filter(self, source, enabled):
-        """设置过滤器"""
-        self.filters[source] = enabled
-
-    def clear(self):
-        """清空输出"""
-        self.text_browser.clear()
-```
-
-#### 设计要点
-
-- **日志分类** - 按来源分类 (发送、接收、系统、错误)
-- **过滤控制** - 支持单独控制各类日志显示
-- **颜色标记** - 不同来源使用不同颜色
+| 模块 | 职责边界 |
+|------|----------|
+| `core/command_executor.py` | 只解析命令行归属和特殊命令类型, 不打开串口, 不操作 UI。 |
+| `managers/special_command_manager.py` | GUI 运行态特殊命令执行, 需要通过主窗口上下文操作串口和控件状态。 |
+| `core/cli_runner.py` | CLI 运行态特殊命令执行, 以配置文件 `state` 为数据源。 |
 
 ---
-
 ## 扩展开发指南
 
 ### 添加新的特殊指令
@@ -1014,3 +865,4 @@ class TestSerialCommunication(unittest.TestCase):
 <p align="center">
   <i>感谢所有贡献者！</i>
 </p>
+

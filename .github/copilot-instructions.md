@@ -53,7 +53,7 @@
 
 ### 构建和打包
 - PyInstaller spec 文件（`main.spec`）处理资源打包
-- 环境变量 `BUNDLE_CALC=true` 包含数字转换器工具
+- 环境变量 `BUNDLE_NUMBER_CONVERTER`, `BUNDLE_BIN_HEX_CONVERTER`, `BUNDLE_FIRMWARE_DOWNLOADER` 控制三个工具项目是否随主程序打包
 - 构建命令：`pyinstaller main.spec`
 - GUI 应用程序隐藏控制台（`console=False`）
 

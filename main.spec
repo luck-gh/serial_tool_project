@@ -10,55 +10,71 @@ import os
 
 # 获取当前工作目录
 spec_dir = os.getcwd()
-
-# 检查是否需要打包位计算器
-# 优先级: 环境变量 BUNDLE_CALC > 自动检测同级目录
-calc_dir = os.path.abspath(os.path.join('..', 'number_converter_project'))
-calc_exists = os.path.exists(calc_dir)
-
-bundle_calc_env = os.environ.get('BUNDLE_CALC', '').lower().strip()
-if bundle_calc_env == 'true':
-    bundle_calc = True
-elif bundle_calc_env == 'false':
-    bundle_calc = False
-else:
-    # 默认逻辑: 如果同级目录存在则打包
-    bundle_calc = calc_exists
+workspace_dir = os.path.dirname(spec_dir)
 
 pathex = []
 hiddenimports = []
 datas = [(os.path.join(spec_dir, 'resources'), 'resources')]
 
-if bundle_calc:
-    if calc_exists:
-        # 将父目录加入路径，这样可以作为包导入 number_converter_project
-        # 把主工程的父目录加入 pathex，确保子工程包可被找到
-        pathex.append(os.path.dirname(spec_dir))
-        # 明确列出隐藏导入，避免打包时被遗漏
-        hiddenimports.append('number_converter_project.number_conversion_dialog')
-        # 如果需要，也可以显式添加子工程资源目录到 datas, 示例已包含对整个子工程的文件收集
-        
-        # 收集需要的文件，排除 dist, build, __pycache__, .git 等
-        excluded_dirs = {'dist', 'build', '__pycache__', '.git', '.idea', '.vscode'}
-        for root, dirs, files in os.walk(calc_dir):
-            # 过滤目录
-            dirs[:] = [d for d in dirs if d not in excluded_dirs]
-            
-            for file in files:
-                # 排除 spec 文件和 python 编译文件
-                if file.endswith('.spec') or file.endswith('.pyc'):
-                    continue
-                    
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, calc_dir)
-                dest_path = os.path.join('number_converter_project', os.path.dirname(rel_path))
-                datas.append((full_path, dest_path))
-        
-        print(f"### Bundling Bit Calculator (filtered) from: {calc_dir}")
-    else:
-        print(f"### Warning: BUNDLE_CALC is true but directory not found at {calc_dir}")
+def env_enabled(env_name, default):
+    value = os.environ.get(env_name, '').lower().strip()
+    if value in ('1', 'true', 'yes', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'off'):
+        return False
+    return default
 
-print(f"### bundle_calc {bundle_calc}")
+
+def add_subproject(project_name, hidden_imports, env_name):
+    project_dir = os.path.abspath(os.path.join(workspace_dir, project_name))
+    project_exists = os.path.isdir(project_dir)
+    should_bundle = env_enabled(env_name, project_exists)
+
+    print(f"### {project_name}: exists={project_exists}, bundle={should_bundle}")
+
+    if not should_bundle:
+        return
+    if not project_exists:
+        print(f"### Warning: {env_name} is enabled but directory not found: {project_dir}")
+        return
+
+    if workspace_dir not in pathex:
+        pathex.append(workspace_dir)
+
+    hiddenimports.extend(hidden_imports)
+
+    excluded_dirs = {'dist', 'build', '__pycache__', '.git', '.idea', '.vscode', '.pytest_cache'}
+    for root, dirs, files in os.walk(project_dir):
+        dirs[:] = [d for d in dirs if d not in excluded_dirs]
+
+        for file in files:
+            if file.endswith(('.spec', '.pyc', '.pyo')):
+                continue
+
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, project_dir)
+            dest_path = os.path.join(project_name, os.path.dirname(rel_path))
+            datas.append((full_path, dest_path))
+
+    print(f"### Bundled subproject from: {project_dir}")
+
+
+add_subproject(
+    'number_converter_project',
+    ['number_converter_project.number_conversion_dialog'],
+    'BUNDLE_NUMBER_CONVERTER',
+)
+add_subproject(
+    'bin_hex_converter_project',
+    ['bin_hex_converter_project.bin_hex_converter_dialog'],
+    'BUNDLE_BIN_HEX_CONVERTER',
+)
+add_subproject(
+    'firmware_downloader_project',
+    ['firmware_downloader_project.firmware_downloader_dialog'],
+    'BUNDLE_FIRMWARE_DOWNLOADER',
+)
+
 a = Analysis(
     ['main.py'],
     pathex=pathex,
@@ -87,7 +103,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

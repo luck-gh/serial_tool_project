@@ -1,19 +1,40 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+应用程序入口, 负责根据启动参数进入 GUI 模式或 CLI 模式。
+
+Author: GuoHowe
+E-Mail: 844396800@qq.com
+Website: www.GuoHowe.com
+"""
+
 import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QStyleFactory)
 from main_window import SerialTool
+from core.cli_runner import build_parser, run_cli, should_run_cli
 import datetime
 
-TOOL_VERSION = "1.1.4"
-TOOL_VERSION_DATE = datetime.datetime(2026, 5, 4, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
+TOOL_VERSION = "1.2.0"
+TOOL_VERSION_DATE = datetime.datetime(2026, 5, 6, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def hide_console_for_gui():
+    """打包为控制台程序时, GUI 模式隐藏控制台窗口."""
+    if not (getattr(sys, 'frozen', False) and os.name == 'nt'):
+        return
+    try:
+        import ctypes
+        console_window = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_window:
+            ctypes.windll.user32.ShowWindow(console_window, 0)
+    except Exception:
+        pass
+
 
 def main():
     """应用程序主入口"""
-    app = QApplication(sys.argv)
-
-    # 设置应用程序样式
-    app.setStyle(QStyleFactory.create('Fusion'))
-
     # 获取可执行文件名 (不含扩展名)
     if getattr(sys, 'frozen', False):
         # 在打包后运行
@@ -23,6 +44,18 @@ def main():
         exe_path = os.path.abspath(__file__)
     
     exe_name = os.path.splitext(os.path.basename(exe_path))[0]
+
+    if should_run_cli(sys.argv[1:]):
+        parser = build_parser()
+        args = parser.parse_args()
+        sys.exit(run_cli(args, exe_name, TOOL_VERSION, TOOL_VERSION_DATE))
+
+    hide_console_for_gui()
+
+    app = QApplication(sys.argv)
+
+    # 设置应用程序样式
+    app.setStyle(QStyleFactory.create('Fusion'))
 
     window = SerialTool(
         tool_version=TOOL_VERSION,

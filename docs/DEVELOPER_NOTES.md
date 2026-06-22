@@ -23,7 +23,11 @@
 
 ```
 serial_tool_project/
-├── main.py                          # 应用程序主入口, 负责 GUI/CLI 启动分流
+├── main.py                          # 兼容入口, 根据参数分流 GUI/CLI
+├── gui_main.py                      # GUI 专用入口
+├── cli_main.py                      # CLI 专用入口
+├── version_info.py                  # GUI/CLI 共用版本信息
+├── app_identity.py                  # 可执行文件名和配置文件名转换
 ├── main_window.py                   # 主窗口 UI 和核心交互逻辑
 ├── main.spec                        # PyInstaller 打包配置
 ├── main_config.json                 # 应用程序配置文件 (自动生成)
@@ -264,7 +268,11 @@ main_window.py (主窗口)
 
 | 文件 | 职责 |
 |------|------|
-| `main.py` | 应用程序主入口, 根据启动参数进入 GUI 模式或 CLI 模式, 并维护工具版本信息。 |
+| `main.py` | 兼容入口, 根据启动参数进入 GUI 模式或 CLI 模式。 |
+| `gui_main.py` | GUI 专用入口, 只启动图形界面, 用于 GUI 专用打包产物。 |
+| `cli_main.py` | CLI 专用入口, 只运行命令行模式, 用于 CLI 专用打包产物。 |
+| `version_info.py` | 维护 GUI/CLI 入口共用的工具版本和更新时间。 |
+| `app_identity.py` | 规范化可执行文件名, 生成默认配置文件名, 自动忽略 `_GUI`/`_CLI` 后缀。 |
 | `main_window.py` | GUI 主窗口, 负责界面布局, 串口操作, 远程控制协调, 命令发送流程和状态保存。 |
 
 ### core

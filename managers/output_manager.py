@@ -18,6 +18,7 @@ class OutputManager:
     """统一输出管理器"""
     def __init__(self, text_browser:CustomTextBrowser, timestamp_check, show_send_check, send_color_getter, source_filter_getter=None):
         self.text_browser = text_browser
+        self._receive_pending_cr = False
         self.rules = OutputRules(
             timestamp_enabled=timestamp_check,
             show_send_enabled=show_send_check,
@@ -31,6 +32,8 @@ class OutputManager:
         """统一添加文本到显示区"""
         if not self.rules.source_enabled(source_type):
             return
+        if source_type == OutputSource.RECEIVE:
+            text = self._coalesce_receive_crlf(text)
 
         cursor = self.text_browser.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -59,7 +62,19 @@ class OutputManager:
         """重置接收时间戳标志 (在发送数据后调用) """
         self.rules.reset_receive_timestamp()
 
+    def _coalesce_receive_crlf(self, text):
+        """合并跨串口包拆开的 CRLF, 避免显示区偶发空行。"""
+        if not text:
+            return text
+
+        if self._receive_pending_cr and text.startswith("\n"):
+            text = text[1:]
+
+        self._receive_pending_cr = text.endswith("\r")
+        return text
+
     def clear(self):
         """清空显示区"""
         self.text_browser.clear()
+        self._receive_pending_cr = False
         self.rules.reset_receive_timestamp()

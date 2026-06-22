@@ -9,13 +9,16 @@ E-Mail: 844396800@qq.com
 Website: www.GuoHowe.com
 """
 
+import csv
+import io
 import re
 import os
 import sys
 import subprocess
 from PyQt5.QtWidgets import (QApplication, QWidget, QLineEdit, QTableWidget, QCheckBox, QPushButton,
                              QHeaderView, QTableWidgetItem, QAction, QInputDialog, QMessageBox,
-                             QDialog, QHBoxLayout, QVBoxLayout, QLabel, QDialogButtonBox)
+                             QDialog, QHBoxLayout, QVBoxLayout, QLabel, QDialogButtonBox, QTextEdit,
+                             QComboBox)
 from PyQt5.QtCore import Qt, QRegExp
 from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics, QRegExpValidator
 
@@ -87,6 +90,150 @@ class HexInputDialog(QDialog):
 
     def get_text(self):
         return self.edit.text().strip()
+
+
+class CommandRowsTextParser:
+    """把模板文本或纯文本解析成命令表格行。"""
+    FORMAT_TEMPLATE = "模板格式 (CSV)"
+    FORMAT_PLAIN_TEXT = "纯文本"
+
+    TEMPLATE_HELP = (
+        "模板格式每行应为: True,串口需要发送的数据,注释\n"
+        "或: False,串口需要发送的数据,注释\n"
+        "注释列可以为空；以 // 开头的行会被当作说明跳过。"
+    )
+
+    @classmethod
+    def parse_rows(cls, text, input_format):
+        if input_format not in (cls.FORMAT_TEMPLATE, cls.FORMAT_PLAIN_TEXT):
+            raise ValueError("请先选择输入格式。")
+
+        if input_format == cls.FORMAT_PLAIN_TEXT:
+            return cls.parse_plain_text_rows(text)
+
+        return cls.parse_template_rows(text)
+
+    @classmethod
+    def parse_plain_text_rows(cls, text):
+        rows = []
+        for line in text.splitlines():
+            command = line.strip()
+            if command:
+                rows.append((False, command, ""))
+        if not rows:
+            raise ValueError("请输入至少一行非空文本。")
+        return rows
+
+    @classmethod
+    def parse_template_rows(cls, text):
+        rows = []
+        reader = csv.reader(io.StringIO(text))
+        for line_number, row in enumerate(reader, start=1):
+            if not row or not any(cell.strip() for cell in row):
+                continue
+
+            first_cell = row[0].strip()
+            if first_cell.startswith("//") or first_cell.startswith("#"):
+                continue
+
+            enable_str = first_cell.lower()
+            if enable_str not in ("true", "false"):
+                raise ValueError(
+                    f"第 {line_number} 行格式不正确，第一列必须是 True 或 False。"
+                )
+            if len(row) < 2:
+                raise ValueError(f"第 {line_number} 行格式不正确，缺少发送字符串列。")
+
+            enable = enable_str == "true"
+            command = UIUtils.unescape_csv_text(row[1].strip())
+            if len(row) > 2:
+                comment = ",".join(cell.strip() for cell in row[2:])
+                comment = UIUtils.unescape_csv_text(comment)
+            else:
+                comment = ""
+            rows.append((enable, command, comment))
+
+        if not rows:
+            raise ValueError("没有解析到可添加的命令行。")
+        return rows
+
+
+class TextRowsInputDialog(QDialog):
+    """根据多行文本生成命令行的输入对话框。"""
+    FORMAT_TEMPLATE = CommandRowsTextParser.FORMAT_TEMPLATE
+    FORMAT_PLAIN_TEXT = CommandRowsTextParser.FORMAT_PLAIN_TEXT
+    TEMPLATE_HELP = CommandRowsTextParser.TEMPLATE_HELP
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("根据文本添加多行")
+        self.setMinimumSize(520, 360)
+        self.parsed_rows = []
+
+        layout = QVBoxLayout(self)
+
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(QLabel("输入格式:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems([self.FORMAT_TEMPLATE, self.FORMAT_PLAIN_TEXT])
+        format_layout.addWidget(self.format_combo, 1)
+        layout.addLayout(format_layout)
+
+        self.help_label = QLabel(self.TEMPLATE_HELP)
+        self.help_label.setWordWrap(True)
+        layout.addWidget(self.help_label)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText("请在这里输入多行文本...")
+        layout.addWidget(self.text_edit, 1)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self._validate_and_accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+        self.format_combo.currentTextChanged.connect(self._update_help_text)
+        self.format_combo.setCurrentText(self.FORMAT_PLAIN_TEXT)
+        self._update_help_text(self.FORMAT_PLAIN_TEXT)
+
+    @staticmethod
+    def parse_rows(text, input_format):
+        return CommandRowsTextParser.parse_rows(text, input_format)
+
+    @staticmethod
+    def parse_template_rows(text):
+        return CommandRowsTextParser.parse_template_rows(text)
+
+    def get_rows(self):
+        return self.parsed_rows
+
+    def _update_help_text(self, input_format):
+        if input_format == self.FORMAT_TEMPLATE:
+            self.help_label.setText(self.TEMPLATE_HELP)
+            self.text_edit.setPlaceholderText(
+                "例如:\n"
+                "// 选择框,串口需要发送的数据,注释\n"
+                "True,AT+RESET,复位命令\n"
+                "False,AT+VERSION,读取版本"
+            )
+        elif input_format == self.FORMAT_PLAIN_TEXT:
+            self.help_label.setText("纯文本格式: 每一行文本会作为一条发送字符串添加。")
+            self.text_edit.setPlaceholderText("例如:\nAT+RESET\nAT+VERSION")
+        else:
+            self.help_label.setText("请先选择输入格式。")
+            self.text_edit.setPlaceholderText("请选择上方的输入格式后，再输入多行文本。")
+
+    def _validate_and_accept(self):
+        try:
+            self.parsed_rows = self.parse_rows(
+                self.text_edit.toPlainText(),
+                self.format_combo.currentText(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "格式不正确", f"{exc}\n\n{self.TEMPLATE_HELP}")
+            return
+
+        self.accept()
 
 
 class CommandLineEdit(QLineEdit, BaseWidgetMixin):
@@ -536,6 +683,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         insert_multi_action.triggered.connect(lambda: self.insert_multi_rows(target_row))
         menu.addAction(insert_multi_action)
 
+        insert_from_text_action = QAction("根据文本添加多行...", self)
+        insert_from_text_action.triggered.connect(lambda: self.insert_rows_from_text(target_row))
+        menu.addAction(insert_from_text_action)
+
         # 删除行
         if num_selected > 1:
             delete_action = QAction(f"删除选中的 {num_selected} 行", self)
@@ -752,6 +903,39 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         count, ok = QInputDialog.getInt(self, "插入多行", "请输入要插入的行数:", 1, 1, 100, 1)
         if ok:
             self.insert_row_above(row, count)
+
+    def insert_rows_from_text(self, row):
+        """根据用户输入的多行文本插入命令行。"""
+        dialog = TextRowsInputDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.insert_command_rows_above(row, dialog.get_rows())
+
+    def insert_command_rows_above(self, row, commands):
+        """在指定行上方插入带内容的多行命令。"""
+        if not commands:
+            return
+
+        count = len(commands)
+        new_comments = {}
+        for old_row, comment in self.comments.items():
+            if old_row < row:
+                new_comments[old_row] = comment
+            else:
+                new_comments[old_row + count] = comment
+        self.comments = new_comments
+
+        self.setUpdatesEnabled(False)
+        try:
+            for offset, (enable, command, comment) in enumerate(commands):
+                self.add_command_row(enable, command, comment, row + offset)
+            self.update_send_buttons_after_row(row)
+        finally:
+            self.setUpdatesEnabled(True)
+            self.viewport().update()
+
+        main_window = self.get_main_window()
+        if main_window:
+            main_window.refresh_modules(silent=True)
 
     def connect_send_button(self, row, send_btn):
         """连接发送按钮到正确的行号"""

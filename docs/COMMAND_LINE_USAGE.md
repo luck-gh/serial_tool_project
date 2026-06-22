@@ -95,7 +95,11 @@ python -m serial_tool_project.main
 ```python
 # 示例: main.py -> main_config.json
 # 示例: GHowe串口助手.exe -> GHowe串口助手_config.json
+# 示例: GHowe_串口调试助手_GUI.exe -> GHowe_串口调试助手_config.json
+# 示例: GHowe_串口调试助手_CLI.exe -> GHowe_串口调试助手_config.json
 ```
+
+GUI/CLI 专用打包后缀会自动忽略。可执行文件名末尾的 `_GUI`, `_gui`, `_CLI`, `_cli` 不参与默认配置文件名生成, 因此兼容版、GUI 专用版和 CLI 专用版默认共用同一份配置。
 
 **配置文件查找规则**:
 1. 首先在当前工作目录查找
@@ -125,7 +129,10 @@ mv GHowe串口助手 MySerialTool
 # 发送普通字符串
 python main.py --cli --send "AT"
 
-# 打包后使用同一个 exe
+# 打包后使用 CLI 专用 exe
+GHowe_串口调试助手_CLI.exe --send "AT"
+
+# 兼容版 exe 仍支持旧的 --cli 分流方式
 GHowe_串口调试助手.exe --cli --send "AT"
 
 # 发送十六进制
@@ -310,21 +317,26 @@ mv main_config.json main_config.json.bak
 # 安装 PyInstaller
 pip install pyinstaller
 
-# 打包成单个可执行文件
+# 基础方式只打包单个入口；项目推荐使用 main.spec 同时输出三个版本
 pyinstaller --onefile --windowed --icon=resources/HOWE_LOGO.ico main.py
 ```
 
 #### 使用 spec 文件打包 (推荐)
 
 ```bash
-# 首次生成 spec 文件
-pyi-makespec --onefile --windowed --icon=resources/HOWE_LOGO.ico main.py
-
-# 编辑 main.spec 文件 (参考项目中的 main.spec)
-
 # 使用 spec 文件打包
 pyinstaller main.spec
 ```
+
+当前 `main.spec` 会同时输出三个 Windows 可执行文件:
+
+| 产物 | 入口 | 用途 | 控制台 |
+|------|------|------|--------|
+| `GHowe_串口调试助手.exe` | `main.py` | 兼容旧用法, 根据参数自动进入 GUI 或 CLI | 有 |
+| `GHowe_串口调试助手_GUI.exe` | `gui_main.py` | 只启动图形界面 | 无 |
+| `GHowe_串口调试助手_CLI.exe` | `cli_main.py` | 只运行命令行模式 | 有 |
+
+三个产物默认共用 `GHowe_串口调试助手_config.json`; `_GUI` 和 `_CLI` 后缀会在生成默认配置文件名时自动去掉。
 
 ### 打包选项说明
 
@@ -338,54 +350,13 @@ pyinstaller main.spec
 | `--upx` | 使用 UPX 压缩 | 可选 |
 | `--clean` | 清理临时文件 | 推荐 |
 
-### spec 文件配置示例
-
-```python
-# -*- mode: python ; coding: utf-8 -*-
-
-a = Analysis(
-    ['main.py'],
-    pathex=[],
-    binaries=[],
-    datas=[('resources/HOWE_LOGO.ico', 'resources')],  # 资源文件
-    hiddenimports=[],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    noarchive=False,
-)
-
-pyz = PYZ(a.pure)
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='GHowe串口助手',  # 可执行文件名
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,  # 启用 UPX 压缩
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,  # 单 exe 同时支持 GUI 和 CLI 输出
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon='resources/HOWE_LOGO.ico'  # 应用图标
-)
-```
-
 ### 打包后目录结构
 
 ```
 dist/
-├── GHowe串口助手.exe  (可执行文件)
+├── GHowe_串口调试助手.exe      (兼容版)
+├── GHowe_串口调试助手_GUI.exe  (GUI 专用版)
+├── GHowe_串口调试助手_CLI.exe  (CLI 专用版)
 └── (运行时自动生成配置文件)
 
 build/  (构建临时文件，可删除)
@@ -520,6 +491,8 @@ python -m serial_tool_project.main
 ### 打包环境变量
 
 `main.spec` 会自动检测主工程同级目录下的三个工具项目。目录存在时默认打包, 目录不存在时自动跳过。也可以用环境变量强制启用或禁用。
+
+这些外部/内置工具项目只随兼容版和 GUI 专用版打包; CLI 专用版不打包 GUI 插件资源。
 
 | 环境变量 | 控制项目 | 默认行为 |
 |----------|----------|----------|

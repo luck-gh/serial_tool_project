@@ -2,25 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-应用程序入口, 负责根据启动参数进入 GUI 模式或 CLI 模式。
+GUI 独立入口, 只启动串口调试助手图形界面。
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
 Website: www.GuoHowe.com
 """
 
-import sys
 import os
-from PyQt5.QtWidgets import (QApplication, QStyleFactory)
-from main_window import SerialTool
-from core.cli_runner import build_parser, run_cli, should_run_cli
-from version_info import TOOL_VERSION_DATE
+import sys
 
-TOOL_VERSION = "1.2.1"
+from PyQt5.QtWidgets import QApplication, QStyleFactory
+
+from main_window import SerialTool
+from version_info import TOOL_VERSION, TOOL_VERSION_DATE
 
 
 def hide_console_for_gui():
-    """打包为控制台程序时, GUI 模式隐藏控制台窗口."""
+    """打包为控制台程序时, GUI 模式隐藏控制台窗口。"""
     if not (getattr(sys, 'frozen', False) and os.name == 'nt'):
         return
     try:
@@ -33,33 +32,22 @@ def hide_console_for_gui():
 
 
 def main():
-    """应用程序主入口"""
-    # 获取可执行文件名 (不含扩展名)
+    """GUI 主入口。"""
     if getattr(sys, 'frozen', False):
-        # 在打包后运行
         exe_path = sys.executable
     else:
-        # 在开发环境中运行
         exe_path = os.path.abspath(__file__)
-    
     exe_name = os.path.splitext(os.path.basename(exe_path))[0]
-
-    if should_run_cli(sys.argv[1:]):
-        parser = build_parser()
-        args = parser.parse_args()
-        sys.exit(run_cli(args, exe_name, TOOL_VERSION, TOOL_VERSION_DATE))
 
     hide_console_for_gui()
 
     app = QApplication(sys.argv)
-
-    # 设置应用程序样式
     app.setStyle(QStyleFactory.create('Fusion'))
 
     window = SerialTool(
         tool_version=TOOL_VERSION,
         tool_version_date=TOOL_VERSION_DATE,
-        exe_name=exe_name
+        exe_name=exe_name,
     )
     window.show()
     sys.exit(app.exec_())

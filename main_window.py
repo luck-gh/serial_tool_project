@@ -25,28 +25,27 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QFrame,
                              QMessageBox, QFileDialog, QDialog, QDialogButtonBox, QTextEdit,
                              QSplitter, QMenu, QAction, QSizePolicy, QStyleFactory, QInputDialog,
-                             QProgressDialog)
+                             QProgressDialog, QStyle)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette
 
 from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource, SpecialCommandType
 from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox, ClickableComboBox
-from widgets.command_widgets import CommandTableWidget
+from widgets.command_widgets import CommandRowsTextParser, CommandTableWidget
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
 from core.serial_thread import SerialThread
 from core.remote_control import RemoteControlClient, RemoteControlServer
 from core import output_rules
+from app_identity import get_config_file
 from managers.config_manager import ConfigManager
 from dialogs.config_dialog import ConfigDialog
 from widgets.base_widgets import BaseWidgetMixin
 
 class SerialTool(QMainWindow, BaseWidgetMixin):
     """串口调试工具主窗口"""
-    LEFT_PANEL_MAX_WIDTH = 340
-    LEFT_BASIC_COMBO_WIDTH = 170
-    LEFT_CONTROL_MAX_WIDTH = 300
-    LEFT_COMPACT_CONTROL_WIDTH = 60
+    LEFT_PORT_COMBO_VISIBLE_CHARS = 7
+    LEFT_PANEL_DEFAULT_EXTRA_WIDTH = 60
     SYNC_BUTTON_WIDTH = 30
 
     def __init__(self, tool_version="0.0.0", tool_version_date="N/A", exe_name="main"):
@@ -68,8 +67,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.current_module = "全部"
         self.modules = OrderedDict()  # 存储模块信息
 
-        # 使用可执行文件名来构建配置文件名
-        config_file = f"{self.exe_name}_config.json"
+        # 使用规范化后的可执行文件名来构建配置文件名。
+        config_file = get_config_file(self.exe_name)
         try:
             self.config_manager = ConfigManager(
                 tool_version=self.tool_version,
@@ -102,9 +101,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def eventFilter(self, obj, event):
         """滚轮事件过滤器, 防止指定控件被滚轮误改"""
         if event.type() == QEvent.Wheel:
-            if isinstance(obj, QComboBox):
-                return True
-            if obj in (self.interval_spin, self.loop_interval_spin):
+            if isinstance(obj, (QComboBox, QSpinBox, QDoubleSpinBox)):
                 return True
         return False
 
@@ -243,7 +240,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 左侧设置面板
         self.left_panel = self.create_left_panel()
-        self.left_panel.setMaximumWidth(self.LEFT_PANEL_MAX_WIDTH)
         self.h_splitter.addWidget(self.left_panel)
 
         # 右侧数据交互面板
@@ -251,7 +247,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.h_splitter.addWidget(self.right_panel)
 
         # 设置分割器比例
-        self.h_splitter.setSizes([300, 700])
+        self._set_h_splitter_sizes()
         self.h_splitter.setHandleWidth(2)
 
         main_layout.addWidget(self.h_splitter)
@@ -270,6 +266,87 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 更新工具状态
         self.update_tools_state()
+
+    def _set_h_splitter_sizes(self, sizes=None):
+        """设置主分割器宽度，避免左侧设置区初始状态过窄。"""
+        if sizes and len(sizes) >= 2:
+            try:
+                left_width = int(sizes[0])
+                total_width = sum(max(int(size), 0) for size in sizes[:2])
+            except (TypeError, ValueError):
+                left_width = self._left_panel_default_width()
+                total_width = self.width()
+        else:
+            left_width = self._left_panel_default_width()
+            total_width = self.width()
+
+        left_panel_min_width = self._left_panel_min_width()
+        left_width = max(left_panel_min_width, left_width)
+        right_width = max(total_width - left_width, 1)
+        self.h_splitter.setSizes([left_width, right_width])
+
+    def _width_for_chars(self, widget, visible_chars, extra_width=36):
+        """按当前字体估算控件宽度，适配不同 DPI/缩放。"""
+        return widget.fontMetrics().horizontalAdvance("M" * visible_chars) + extra_width
+
+    def _left_panel_min_width(self):
+        """按当前字体估算左侧面板最小可读宽度。"""
+        label_width = self._left_basic_label_width()
+        scrollbar_width = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        frame_width = self.style().pixelMetric(QStyle.PM_DefaultFrameWidth)
+        margins_and_spacing = 72 + scrollbar_width + frame_width * 4
+        return label_width + self._left_control_area_width() + margins_and_spacing
+
+    def _left_panel_default_width(self):
+        return self._left_panel_min_width() + self.LEFT_PANEL_DEFAULT_EXTRA_WIDTH
+
+    def _compact_button_width(self, text):
+        return self.fontMetrics().horizontalAdvance(text) + 28
+
+    def _set_compact_button_width(self, button):
+        button.setFixedWidth(self._compact_button_width(button.text()))
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def _left_port_combo_width(self):
+        return self._width_for_chars(self, self.LEFT_PORT_COMBO_VISIBLE_CHARS)
+
+    def _left_control_area_width(self):
+        return self._compact_button_width("刷新") + 6 + self._left_port_combo_width()
+
+    def _set_left_control_expanding(self, widget):
+        """左侧普通控件只随布局伸缩，不人为设置最小宽度。"""
+        widget.setMinimumWidth(0)
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _set_port_combo_compact_width(self):
+        """端口框只保留短显示宽度，完整名称通过提示查看。"""
+        self.port_combo.setMinimumContentsLength(self.LEFT_PORT_COMBO_VISIBLE_CHARS)
+        self.port_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.port_combo.setMinimumWidth(self._left_port_combo_width())
+        self.port_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _left_basic_label_width(self):
+        return self.fontMetrics().horizontalAdvance("波特率:") + 8
+
+    def _create_left_basic_label(self, text):
+        label = QLabel(text)
+        label.setFixedWidth(self._left_basic_label_width())
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return label
+
+    def _add_port_combo_item(self, display):
+        """添加串口下拉项，并用提示显示完整端口名称。"""
+        index = self.port_combo.count()
+        self.port_combo.addItem(display)
+        self.port_combo.setItemData(index, display, Qt.ToolTipRole)
+
+    def _sync_port_combo_display(self, text=None):
+        """同步端口提示，并让窄输入框优先显示左侧字符。"""
+        self.port_combo.setToolTip(text if text is not None else self.port_combo.currentText())
+        line_edit = self.port_combo.lineEdit() if self.port_combo.isEditable() else None
+        if line_edit:
+            line_edit.deselect()
+            line_edit.setCursorPosition(0)
 
     def update_tools_state(self):
         """根据配置更新所有工具按钮状态（通用方法）"""
@@ -305,72 +382,71 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 添加刷新按钮
         self.refresh_ports_btn = QPushButton("刷新")
-        self.refresh_ports_btn.setFixedWidth(self.LEFT_COMPACT_CONTROL_WIDTH)
+        self._set_compact_button_width(self.refresh_ports_btn)
         self._bind_momentary_button_feedback(self.refresh_ports_btn, Colors.GREEN_BUTTON)
 
-        # 下拉菜单的最小宽度
-        basic_combo_width = self.LEFT_BASIC_COMBO_WIDTH
-        left_control_max_width = self.LEFT_CONTROL_MAX_WIDTH
+        # 左侧面板最小宽度以端口行控制区为基准，普通控件随布局自动伸缩。
         # 端口选择
         port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel("端口:"))
+        port_layout.addWidget(self._create_left_basic_label("端口:"))
         self.port_combo = ClickableComboBox()
         self.port_combo.setEditable(True)
         self.port_combo.popupAboutToBeShown.connect(self.refresh_ports)
+        self.port_combo.currentTextChanged.connect(self._sync_port_combo_display)
         self.port_combo.installEventFilter(self)            # 禁用滚轮
-        self.port_combo.setFixedWidth(basic_combo_width)     # 设置固定宽度
+        self._set_port_combo_compact_width()
         port_layout.addWidget(self.refresh_ports_btn)
         port_layout.addWidget(self.port_combo)
         basic_layout.addLayout(port_layout)
 
         # 波特率
         baud_layout = QHBoxLayout()
-        baud_layout.addWidget(QLabel("波特率:"))
+        baud_layout.addWidget(self._create_left_basic_label("波特率:"))
         self.baud_combo = QComboBox()
         self.baud_combo.setEditable(True)
         self.baud_combo.addItems(["9600", "115200", "57600", "38400", "19200", "4800"])
         self.baud_combo.setCurrentText("115200")
         self.baud_combo.installEventFilter(self)            # 禁用滚轮
-        self.baud_combo.setFixedWidth(basic_combo_width)     # 设置固定宽度
+        self._set_left_control_expanding(self.baud_combo)
         baud_layout.addWidget(self.baud_combo)
         basic_layout.addLayout(baud_layout)
 
         # 数据位
         data_bits_layout = QHBoxLayout()
-        data_bits_layout.addWidget(QLabel("数据位:"))
+        data_bits_layout.addWidget(self._create_left_basic_label("数据位:"))
         self.data_bits_combo = QComboBox()
         self.data_bits_combo.addItems(["5", "6", "7", "8"])
         self.data_bits_combo.setCurrentText("8")
         self.data_bits_combo.installEventFilter(self)       # 禁用滚轮
-        self.data_bits_combo.setFixedWidth(basic_combo_width) # 设置固定宽度
+        self._set_left_control_expanding(self.data_bits_combo)
         data_bits_layout.addWidget(self.data_bits_combo)
         basic_layout.addLayout(data_bits_layout)
 
         # 校验位
         parity_layout = QHBoxLayout()
-        parity_layout.addWidget(QLabel("校验位:"))
+        parity_layout.addWidget(self._create_left_basic_label("校验位:"))
         self.parity_combo = QComboBox()
         self.parity_combo.addItems(["None", "Even", "Odd", "Mark"])
         self.parity_combo.setCurrentText("None")
         self.parity_combo.installEventFilter(self)          # 禁用滚轮
-        self.parity_combo.setFixedWidth(basic_combo_width)   # 设置固定宽度
+        self._set_left_control_expanding(self.parity_combo)
         parity_layout.addWidget(self.parity_combo)
         basic_layout.addLayout(parity_layout)
 
         # 停止位
         stop_bits_layout = QHBoxLayout()
-        stop_bits_layout.addWidget(QLabel("停止位:"))
+        stop_bits_layout.addWidget(self._create_left_basic_label("停止位:"))
         self.stop_bits_combo = QComboBox()
         self.stop_bits_combo.addItems(["1", "1.5", "2"])
         self.stop_bits_combo.setCurrentText("1")
         self.stop_bits_combo.installEventFilter(self)       # 禁用滚轮
-        self.stop_bits_combo.setFixedWidth(basic_combo_width) # 设置固定宽度
+        self._set_left_control_expanding(self.stop_bits_combo)
         stop_bits_layout.addWidget(self.stop_bits_combo)
         basic_layout.addLayout(stop_bits_layout)
 
         # 打开串口按钮
         self.connect_btn = QPushButton("打开串口")
-        self.connect_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.connect_btn)
         self.connect_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.BLUE_BUTTON};
@@ -391,7 +467,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.remote_mode_combo = QComboBox()
         self.remote_mode_combo.addItems(["主控端", "远程端"])
         self.remote_mode_combo.installEventFilter(self)
-        self.remote_mode_combo.setFixedWidth(basic_combo_width)
+        self._set_left_control_expanding(self.remote_mode_combo)
         remote_mode_layout.addWidget(self.remote_mode_combo)
         remote_layout.addLayout(remote_mode_layout)
 
@@ -401,7 +477,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.remote_host_input.setEditable(True)
         self.remote_host_input.addItem("127.0.0.1")
         self.remote_host_input.installEventFilter(self)
-        self.remote_host_input.setFixedWidth(basic_combo_width)
+        self._set_left_control_expanding(self.remote_host_input)
         remote_host_layout.addWidget(self.remote_host_input)
         remote_layout.addLayout(remote_host_layout)
 
@@ -410,7 +486,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.remote_port_spin = QSpinBox()
         self.remote_port_spin.setRange(1, 65535)
         self.remote_port_spin.setValue(8765)
-        self.remote_port_spin.setFixedWidth(basic_combo_width)
+        self._set_left_control_expanding(self.remote_port_spin)
         self.remote_port_spin.installEventFilter(self)            # 禁用滚轮
         remote_port_layout.addWidget(self.remote_port_spin)
         remote_layout.addLayout(remote_port_layout)
@@ -421,12 +497,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         remote_token_layout.addWidget(self.remote_show_token_check)
         self.remote_token_input = QLineEdit()
         self.remote_token_input.setEchoMode(QLineEdit.Password)
-        self.remote_token_input.setFixedWidth(basic_combo_width)
+        self._set_left_control_expanding(self.remote_token_input)
         remote_token_layout.addWidget(self.remote_token_input)
         remote_layout.addLayout(remote_token_layout)
 
         self.remote_toggle_btn = QPushButton("启用远程控制")
-        self.remote_toggle_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.remote_toggle_btn)
         self._apply_button_color(self.remote_toggle_btn, Colors.BLUE_BUTTON)
         remote_layout.addWidget(self.remote_toggle_btn)
 
@@ -464,11 +540,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         receive_layout.addLayout(source_checkboxes_layout)
 
         self.save_btn = QPushButton("保存数据")
-        self.save_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.save_btn)
         self._bind_momentary_button_feedback(self.save_btn, Colors.GREEN_BUTTON)
 
         self.clear_receive_btn = QPushButton("清空数据")
-        self.clear_receive_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.clear_receive_btn)
         self._bind_momentary_button_feedback(self.clear_receive_btn, Colors.GREEN_BUTTON)
 
         receive_layout.addWidget(self.save_btn)
@@ -485,7 +561,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.ending_combo = QComboBox()
         self.ending_combo.addItems(["None", r"\r\n", r"\r", r"\n"])
         self.ending_combo.setCurrentText(r"\r\n")
-        self.ending_combo.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.ending_combo)
         self.ending_combo.installEventFilter(self)          # 禁用滚轮
         send_layout.addWidget(QLabel("结尾标识符:"))
         send_layout.addWidget(self.ending_combo)
@@ -499,7 +575,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.send_color_combo = QComboBox()
         self.send_color_combo.addItems(["红色", "蓝色", "绿色", "紫色", "黑色"])
         self.send_color_combo.setCurrentText("红色")
-        self.send_color_combo.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.send_color_combo)
         self.send_color_combo.installEventFilter(self)      # 禁用滚轮
         show_send_layout.addWidget(self.send_color_combo)
         send_layout.addLayout(show_send_layout)
@@ -511,6 +587,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.interval_spin.setRange(10, 10000)
         self.interval_spin.setValue(100)
         self.interval_spin.installEventFilter(self)
+        self._set_left_control_expanding(self.interval_spin)
         interval_layout.addWidget(self.interval_spin)
         send_layout.addLayout(interval_layout)
 
@@ -525,6 +602,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.loop_interval_spin.setRange(10, 60000)
         self.loop_interval_spin.setValue(1000)
         self.loop_interval_spin.installEventFilter(self)
+        self._set_left_control_expanding(self.loop_interval_spin)
         loop_layout.addWidget(self.loop_interval_spin)
         send_layout.addLayout(loop_layout)
 
@@ -548,11 +626,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         template_buttons_layout = QHBoxLayout()
         self.import_btn = QPushButton("导入模板")
-        self.import_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.import_btn)
         self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
 
         self.export_btn = QPushButton("导出模板")
-        self.export_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.export_btn)
         self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
 
         template_buttons_layout.addWidget(self.import_btn)
@@ -572,7 +650,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         for tool_name in self.config_manager.get_all_tool_names():
             button_text = self.config_manager.get_tool_button_text(tool_name)
             btn = QPushButton(button_text)
-            btn.setMaximumWidth(left_control_max_width)
+            self._set_left_control_expanding(btn)
             self.tools_group.addWidget(btn)
             self.tool_buttons[tool_name] = btn
 
@@ -580,10 +658,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 配置按钮
         self.config_btn = QPushButton("配置")
-        self.config_btn.setMaximumWidth(left_control_max_width)
+        self._set_left_control_expanding(self.config_btn)
+        self.config_btn.setMinimumWidth(self.config_btn.sizeHint().width())
         self._bind_momentary_button_feedback(self.config_btn, Colors.BLUE_BUTTON)
         layout.addWidget(self.config_btn)
 
+        scroll_area.setMinimumWidth(self._left_panel_min_width())
         return scroll_area
 
     def create_right_panel(self):
@@ -650,7 +730,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         self.jump_row_input = QLineEdit()
         self.jump_row_input.setPlaceholderText("行号")
-        self.jump_row_input.setMaximumWidth(self.LEFT_COMPACT_CONTROL_WIDTH)
+        self.jump_row_input.setMaximumWidth(self._width_for_chars(self.jump_row_input, 5, 24))
         continuous_layout.addWidget(self.jump_row_input)
 
         self.jump_row_btn = QPushButton("跳行")
@@ -766,11 +846,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            self.port_combo.addItem(f"{port.device} - {port.description}")
+            self._add_port_combo_item(f"{port.device} - {port.description}")
 
         # 恢复之前的选择
         if current_text and self.port_combo.findText(current_text) >= 0:
             self.port_combo.setCurrentText(current_text)
+        self._sync_port_combo_display()
 
     def get_selected_port_id(self):
         return self.port_combo.currentText().strip().split(" ")[0]
@@ -1079,7 +1160,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             else:
                 display = str(port)
             if display:
-                self.port_combo.addItem(display)
+                self._add_port_combo_item(display)
 
         target_port = str(config.get("port", ""))
         if target_port and self.port_combo.findText(target_port) >= 0:
@@ -1090,10 +1171,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     self.port_combo.setCurrentIndex(index)
                     break
             else:
-                self.port_combo.addItem(target_port)
+                self._add_port_combo_item(target_port)
                 self.port_combo.setCurrentText(target_port)
         elif current_text and self.port_combo.findText(current_text) >= 0:
             self.port_combo.setCurrentText(current_text)
+        self._sync_port_combo_display()
         self.port_combo.blockSignals(False)
 
     def update_connect_button_state(self, connected):
@@ -1121,8 +1203,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         port = str(config.get("port", ""))
         if port:
             if self.port_combo.findText(port) < 0:
-                self.port_combo.addItem(port)
+                self._add_port_combo_item(port)
             self.port_combo.setCurrentText(port)
+            self._sync_port_combo_display()
         self.baud_combo.setCurrentText(str(config.get("baudrate", "115200")))
         self.data_bits_combo.setCurrentText(str(config.get("databits", "8")))
         self.parity_combo.setCurrentText(str(config.get("parity", "None")))
@@ -1427,8 +1510,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 matched = True
                 break
         if not matched:
-            self.port_combo.addItem(port_id)
+            self._add_port_combo_item(port_id)
             self.port_combo.setCurrentText(port_id)
+        self._sync_port_combo_display()
 
         self.save_state()
         self.output_manager.append_text(output_rules.comport_updated(port_id), OutputSource.SYSTEM)
@@ -1777,8 +1861,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def _create_progress_dialog(self, title, maximum):
         """创建可取消的进度弹窗"""
         progress = QProgressDialog(title, "取消", 0, maximum, self)
+        if hasattr(progress, "setWindowTitle"):
+            progress.setWindowTitle(self.windowTitle() or "串口调试助手")
         progress.setWindowModality(Qt.WindowModal)
-        progress.setWindowFlags(progress.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        if hasattr(progress, "setWindowFlags") and hasattr(progress, "windowFlags"):
+            progress.setWindowFlags(progress.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         progress.setMinimumDuration(0)
         progress.setAutoClose(True)
         progress.setAutoReset(True)
@@ -1803,6 +1890,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 count += 1
         return count
 
+    def _should_process_progress(self, value, maximum):
+        """控制长任务进度刷新频率，避免大文件逐行刷新阻塞界面。"""
+        if maximum <= 100:
+            return True
+        return value == maximum or value % 100 == 0
+
     def _snapshot_template_state(self):
         """保存导入前模板状态，用于取消时回滚"""
         return {
@@ -1816,7 +1909,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.command_table.clear_all()
         for row, (enable, command, comment) in enumerate(snapshot["commands"]):
             self.command_table.add_command_row(enable, command, comment, row)
-        self.command_table.update_send_buttons_after_row(0)
         self.refresh_modules(silent=True)
 
         jump_module = snapshot.get("jump_module")
@@ -1871,115 +1963,132 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """导入模板"""
         self._set_action_button_running(self.import_btn, True, Colors.GREEN_BUTTON)
 
-        last_dir = self.config_manager.get_last_used_directory()
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "导入模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
-
-        if not filename:
-            self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
-            return
-
-        self.config_manager.set_last_used_directory(os.path.dirname(filename))
-
+        filename = ""
+        parsed_commands = []
         try:
-            total_rows = self._count_importable_rows(filename)
-            progress = self._create_progress_dialog("正在导入模板...", total_rows)
+            while True:
+                last_dir = self.config_manager.get_last_used_directory()
+                filename, _ = QFileDialog.getOpenFileName(
+                    self, "导入模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
+
+                if not filename:
+                    return
+
+                self.config_manager.set_last_used_directory(os.path.dirname(filename))
+
+                with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
+                    file_text = f.read()
+
+                try:
+                    parsed_commands = CommandRowsTextParser.parse_template_rows(file_text)
+                    break
+                except ValueError as parse_error:
+                    user_choice = self._show_template_format_error_dialog(filename, parse_error)
+                    if user_choice == "reselect":
+                        continue
+                    if user_choice != "plain_text":
+                        return
+
+                    try:
+                        parsed_commands = CommandRowsTextParser.parse_plain_text_rows(file_text)
+                    except ValueError as plain_text_error:
+                        QMessageBox.warning(self, "导入失败", str(plain_text_error))
+                        return
+                    break
+
+            total_rows = len(parsed_commands)
+            progress_maximum = max(total_rows, 1)
+            progress = self._create_progress_dialog("正在导入模板...", progress_maximum)
             snapshot = self._snapshot_template_state()
             self._set_long_task_ui_busy(True)
 
-            # 清空现有命令
+            parsed_modules, parsed_module_names, parsed_messages = self._build_template_import_data(parsed_commands)
+
+            # 解析完成后再批量刷新 UI，避免边读文件边频繁创建控件和重绘。
+            self.command_table.setUpdatesEnabled(False)
             self.command_table.clear_all()
             self.modules.clear()
+            self.modules.update(parsed_modules)
             self.jump_module_combo.clear()
             self.send_module_combo.clear()
             self.jump_module_combo.addItem("全部")
             self.send_module_combo.addItem("全部")
+            for module_name in parsed_module_names:
+                self.jump_module_combo.addItem(module_name)
+                self.send_module_combo.addItem(module_name)
 
-            current_module = "默认"
-            self.modules[current_module] = []
+            for row, (enable, command, comment) in enumerate(parsed_commands):
+                self.command_table.add_command_row(enable, command, comment, row)
+                if self._should_process_progress(row + 1, total_rows) and self._process_progress(progress, row + 1):
+                    self._restore_template_state(snapshot)
+                    self.output_manager.append_text("导入已取消", OutputSource.SYSTEM)
+                    return
 
-            row = 0
-            processed = 0
-            with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
-                reader = csv.reader(f)
-                for csv_row in reader:
-                    # 跳过空行
-                    if not csv_row or len(csv_row) == 0:
-                        continue
+            for message in parsed_messages:
+                self.output_manager.append_text(message, OutputSource.SYSTEM)
 
-                    # 跳过注释行（第一列以//或#开头）
-                    if csv_row[0].strip().startswith('//') or csv_row[0].strip().startswith('#'):
-                        continue
-
-                    # 检查是否为有效数据行（至少2列）
-                    if len(csv_row) < 2:
-                        continue
-
-                    # 解析第一列（True/False）
-                    enable_str = csv_row[0].strip().lower()
-                    if enable_str not in ['true', 'false']:
-                        continue  # 跳过非数据行
-
-                    enable = (enable_str == 'true')
-
-                    # 解析命令和注释
-                    # 第2列是命令，第3列及之后的所有内容都是注释（包括逗号）
-                    command = UIUtils.unescape_csv_text(csv_row[1].strip())
-
-                    # 如果有第3列及以后的内容，将它们全部合并为注释
-                    if len(csv_row) > 2:
-                        # 将第3列及之后的所有列用逗号连接起来作为完整注释
-                        comment_parts = [csv_row[i].strip() for i in range(2, len(csv_row))]
-                        comment = ','.join(comment_parts)
-                        comment = UIUtils.unescape_csv_text(comment)
-                    else:
-                        comment = ""
-
-                    # 检查特殊指令
-                    cmd_type_str, param = UIUtils.parse_special_command(command)
-                    if cmd_type_str == 'mode':
-                        current_module = param.strip()
-                        self.modules[current_module] = []
-                        self.jump_module_combo.addItem(current_module)
-                        self.send_module_combo.addItem(current_module)
-                        # 添加系统消息提示模块已创建
-                        self.output_manager.append_text(f"已创建模块: '{current_module}'", OutputSource.SYSTEM)
-                    elif cmd_type_str == 'modeend':
-                        # modeend指令：结束当前模块，切换回默认模块
-                        if enable:
-                            self.modules[current_module].append(row)
-                        if current_module != "默认":
-                            current_module = "默认"
-                            # 如果默认模块还未初始化，创建它
-                            if current_module not in self.modules:
-                                self.modules[current_module] = []
-                            self.output_manager.append_text("模块定义已结束，切换回默认模块", OutputSource.SYSTEM)
-                    # delay指令会在发送时处理
-
-                    # 添加命令到表格 (保持行号对应)
-                    self.command_table.add_command_row(enable, command, comment, row)
-
-                    # 添加到当前模块 (非注释行和特殊指令行)
-                    if cmd_type_str not in ('mode', 'modeend') and not (enable is False and command == "" and comment):
-                        self.modules[current_module].append(row)
-
-                    row += 1
-                    processed += 1
-                    if self._process_progress(progress, processed):
-                        self._restore_template_state(snapshot)
-                        self.output_manager.append_text("导入已取消", OutputSource.SYSTEM)
-                        return
-
-            # 导入完成后, 确保所有按钮连接正确
-            self.command_table.update_send_buttons_after_row(0)
-            progress.setValue(total_rows)
+            progress.setValue(progress_maximum)
             self.output_manager.append_text(f"模板已导入: {filename}", OutputSource.SYSTEM)
 
         except Exception as e:
             self.output_manager.append_text(f"错误: 导入模板失败: {str(e)}", OutputSource.ERROR)
         finally:
+            self.command_table.setUpdatesEnabled(True)
+            self.command_table.viewport().update()
             self._set_long_task_ui_busy(False)
             self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
+
+    def _show_template_format_error_dialog(self, filename, error):
+        """模板格式不匹配时，让用户选择重新选文件或按纯文本导入。"""
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setWindowTitle("模板格式不正确")
+        message_box.setText(f"文件不是有效的模板格式:\n{os.path.basename(filename)}")
+        message_box.setInformativeText(
+            f"{error}\n\n正确格式:\n"
+            "True,发送字符串,注释\n"
+            "False,发送字符串,注释\n\n"
+            "是否重新选择文件，还是依然按纯文本导入？"
+        )
+        reselect_button = message_box.addButton("重新选择文件", QMessageBox.AcceptRole)
+        plain_text_button = message_box.addButton("依然导入", QMessageBox.DestructiveRole)
+        message_box.setDefaultButton(reselect_button)
+        message_box.exec_()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == plain_text_button:
+            return "plain_text"
+        if clicked_button == reselect_button:
+            return "reselect"
+        return "cancel"
+
+    def _build_template_import_data(self, parsed_commands):
+        """根据命令行内容构建模块信息，供模板导入和纯文本兜底导入复用。"""
+        current_module = "默认"
+        parsed_modules = OrderedDict([(current_module, [])])
+        parsed_module_names = []
+        parsed_messages = []
+
+        for row, (enable, command, comment) in enumerate(parsed_commands):
+            cmd_type_str, param = UIUtils.parse_special_command(command)
+            if cmd_type_str == 'mode':
+                current_module = param.strip()
+                parsed_modules[current_module] = []
+                parsed_module_names.append(current_module)
+                parsed_messages.append(f"已创建模块: '{current_module}'")
+            elif cmd_type_str == 'modeend':
+                if enable:
+                    parsed_modules[current_module].append(row)
+                if current_module != "默认":
+                    current_module = "默认"
+                    if current_module not in parsed_modules:
+                        parsed_modules[current_module] = []
+                    parsed_messages.append("模块定义已结束，切换回默认模块")
+
+            if cmd_type_str not in ('mode', 'modeend') and not (enable is False and command == "" and comment):
+                parsed_modules[current_module].append(row)
+
+        return parsed_modules, parsed_module_names, parsed_messages
 
     def export_template(self):
         """导出模板"""
@@ -2017,7 +2126,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     escaped_comment = UIUtils.escape_text(comment)
                     writer.writerow([str(enable), escaped_command, escaped_comment])
 
-                    if self._process_progress(progress, index):
+                    if self._should_process_progress(index, len(commands)) and self._process_progress(progress, index):
                         temp_file.close()
                         self._safe_remove_file(temp_path)
                         self.output_manager.append_text("导出已取消", OutputSource.SYSTEM)
@@ -2204,7 +2313,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             ui_settings = state.get("ui_settings") or state.get("ui_state", {})
             h_sizes = ui_settings.get("h_splitter_sizes")
             if h_sizes:
-                self.h_splitter.setSizes(h_sizes)
+                self._set_h_splitter_sizes(h_sizes)
             
             # 7. 工具设置
             tool_settings = state.get("tool_settings") or state.get("ui_state", {})
@@ -2311,7 +2420,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
             h_sizes = self.config_manager.get("h_splitter_sizes")
             if h_sizes:
-                self.h_splitter.setSizes(h_sizes)
+                self._set_h_splitter_sizes(h_sizes)
 
             saved_commands = self.config_manager.get("saved_commands")
             if saved_commands:

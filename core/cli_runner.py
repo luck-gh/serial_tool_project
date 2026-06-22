@@ -19,6 +19,7 @@ import serial.tools.list_ports
 from core.command_executor import ConfigCommandProvider, collect_module_commands
 from core import output_rules
 from core.output_rules import ANSI_RESET, rules_from_state
+from app_identity import get_config_file
 from managers.config_manager import ConfigManager
 from utils.ui_utils import UIUtils, SpecialCommandType, OutputSource
 
@@ -47,10 +48,6 @@ class CliOutput:
 
 def normalize_port(port_text):
     return (port_text or "").strip().split(" ")[0]
-
-
-def get_config_file(exe_name):
-    return f"{exe_name}_config.json"
 
 
 def get_state(config_manager):

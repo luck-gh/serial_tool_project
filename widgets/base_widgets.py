@@ -48,6 +48,37 @@ class BaseWidgetMixin:
         # 无论标志是否改变，都需要显示对话框
         dialog.show()
 
+    def show_tool_dialog(self, dialog, tool_name, config_manager, main_window=None):
+        """显示工具窗口, 默认不绑定主窗口层级。"""
+        dialog.setParent(None)
+        dialog.setWindowModality(Qt.NonModal)
+        if hasattr(dialog, "setModal"):
+            dialog.setModal(False)
+
+        flags = dialog.windowFlags()
+        flags = (flags & ~Qt.WindowType_Mask) | Qt.Window
+        dialog.setWindowFlags(flags & ~Qt.WindowStaysOnTopHint)
+
+        if main_window and not main_window.windowIcon().isNull():
+            dialog.setWindowIcon(main_window.windowIcon())
+        self._remember_tool_dialog(dialog)
+        self.apply_always_on_top_setting(dialog, tool_name, config_manager)
+
+    def _remember_tool_dialog(self, dialog):
+        """保留独立工具窗口引用, 支持同类工具多开。"""
+        if not hasattr(self, "_open_tool_dialogs"):
+            self._open_tool_dialogs = []
+        self._open_tool_dialogs.append(dialog)
+        dialog.destroyed.connect(lambda _=None, closed_dialog=dialog: self._forget_tool_dialog(closed_dialog))
+
+    def _forget_tool_dialog(self, dialog):
+        if not hasattr(self, "_open_tool_dialogs"):
+            return
+        self._open_tool_dialogs = [
+            open_dialog for open_dialog in self._open_tool_dialogs
+            if open_dialog is not dialog
+        ]
+
     def get_main_window(self):
         """递归查找主窗口"""
         if self.__class__.__name__ == 'SerialTool':
@@ -240,18 +271,17 @@ class BaseWidgetMixin:
                 
                 from number_conversion_dialog import NumberConversionDialog
             
-            # 创建并显示对话框
-            # 注意: 这里需要一个父窗口, 优先使用 main_window
+            # 创建并显示独立窗口; 不传主窗口作为 parent, 避免工具窗口始终压在主窗口上方。
             # 获取配置的默认参数
             default_params = config_manager.get_number_conversion_params()
             self.calc_dialog = NumberConversionDialog(
                 selected_text=text,
                 conversion_type=conversion_type,
                 data_width=default_params.get("data_width", "DWORD"),
-                parent=main_window
+                parent=None
             )
-            # 应用置顶设置（内部会处理窗口显示）
-            self.apply_always_on_top_setting(self.calc_dialog, tool_name, config_manager)
+            self.calc_dialog.setWindowTitle("HEX 计算_GHowe" if conversion_type == "HEX" else "DEC 计算_GHowe")
+            self.show_tool_dialog(self.calc_dialog, tool_name, config_manager, main_window)
             
         except ImportError as e:
             QMessageBox.information(main_window if main_window else self, "提示", f"位计算器模块未找到或未打包。\n错误信息: {str(e)}")
@@ -332,16 +362,15 @@ class BaseWidgetMixin:
             # 获取配置参数
             params = config_manager.get_bin_hex_converter_params()
 
-            # 创建并显示对话框
+            # 创建并显示独立窗口; 不传主窗口作为 parent, 避免工具窗口始终压在主窗口上方。
             self.bin_hex_dialog = BinHexConverterDialog(
-                parent=main_window,
+                parent=None,
                 data_width=params["data_width"],
                 bytes_per_row=params["bytes_per_row"],
                 byteorder=params["byteorder"],
                 uppercase=params["uppercase"]
             )
-            # 应用置顶设置（内部会处理窗口显示）
-            self.apply_always_on_top_setting(self.bin_hex_dialog, tool_name, config_manager)
+            self.show_tool_dialog(self.bin_hex_dialog, tool_name, config_manager, main_window)
 
         except ImportError as e:
             QMessageBox.information(main_window if main_window else self, "提示", f"Bin to Hex 转换器模块未找到或未打包。\n错误信息: {str(e)}")
@@ -594,9 +623,9 @@ class BaseWidgetMixin:
             parity_str = parity_reverse_map.get(parity_value, 'N')
             stopbits_float = stopbits_reverse_map.get(stopbits_value, 1.0)
 
-            # 创建并显示对话框，传递所有参数
+            # 创建并显示独立窗口，传递所有参数; 不传主窗口作为 parent, 避免窗口层级被主窗口固定。
             self.firmware_downloader_dialog = FirmwareDownloaderDialog(
-                parent=main_window,
+                parent=None,
                 # 初始文件
                 initial_file=params.get("initial_file", ""),
                 # 串口配置
@@ -645,8 +674,7 @@ class BaseWidgetMixin:
                 send_end_string=params["send_end_string"],
                 end_string=params["end_string"]
             )
-            # 应用置顶设置（内部会处理窗口显示）
-            self.apply_always_on_top_setting(self.firmware_downloader_dialog, tool_name, config_manager)
+            self.show_tool_dialog(self.firmware_downloader_dialog, tool_name, config_manager, main_window)
 
         except ImportError as e:
             QMessageBox.information(main_window if main_window else self, "提示", f"固件下载工具模块未找到或未打包。\n错误信息: {str(e)}")

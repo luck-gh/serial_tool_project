@@ -4,6 +4,45 @@
 
 ---
 
+## 版本 1.2.1 (2026-06-22)
+
+### 摘要
+
+```txt
+修复串口接收显示与插件窗口层级问题, 优化模块模板导入和左侧配置区自适应布局, 分离 GUI/CLI 打包入口并统一配置文件识别
+
+主要更新内容:
+1. 优化模板导入/导出 - 导入模板先解析再批量刷新 UI, 并增加进度反馈
+2. 新增根据文本添加多行 - 支持纯文本和模板 CSV 两种输入格式
+3. 改进模板导入容错 - 模板格式错误时可重新选择文件或按纯文本导入
+4. 优化左侧配置区布局 - 控件宽度随左侧区域自适应, 端口下拉框紧凑显示并保留完整提示
+5. 修复插件窗口层级 - 内置工具窗口改为普通顶层窗口, 支持多开并保留置顶选项
+6. 修复插件窗口图标 - 普通顶层窗口显示时同步主窗口图标
+7. 修复接收区偶发空行 - 合并跨串口包拆开的 CRLF, 避免显示层产生额外空行
+8. 改进打包方式 - 同时打包兼容版, GUI 专用版和 CLI 专用版三个可执行文件
+9. 统一配置文件识别 - 可执行文件名末尾 `_GUI`, `_gui`, `_CLI`, `_cli` 会在生成配置文件名时自动忽略
+
+修改文件:
+- main.py
+- gui_main.py
+- cli_main.py
+- version_info.py
+- app_identity.py
+- main.spec
+- main_window.py
+- managers/output_manager.py
+- widgets/base_widgets.py
+- widgets/command_widgets.py
+- README.md
+- docs/COMMAND_LINE_USAGE.md
+- docs/DEVELOPER_NOTES.md
+- docs/VERSION_HISTORY.md
+
+版本更新: 1.2.0 -> 1.2.1
+```
+
+---
+
 ## 版本 1.2.0 (2026-05-06)
 
 ### 摘要

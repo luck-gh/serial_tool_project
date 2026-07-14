@@ -71,6 +71,8 @@ class Colors:
     BLUE_BUTTON = "#2196F3"
     GREEN_BUTTON = "#4CAF50"
     RED_BUTTON = "#f44336"
+    PURPLE_BUTTON = "#9C27B0"
+    PURPLE_BUTTON_DARK = "#7B1FA2"
     TABLE_ODD_ROW = "#f0f0f0"
     TABLE_EVEN_ROW = "#ffffff"
     MENU_BACKGROUND = "#ffffff"

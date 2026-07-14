@@ -51,7 +51,7 @@ jobs:
           python .github/scripts/validate_serial_tool_release.py \
             "$TAG_NAME" \
             README.md \
-            main.py | tee version-output.txt
+            version_info.py | tee version-output.txt
           while IFS='=' read -r key value; do
             echo "$key=$value" >> "$GITHUB_OUTPUT"
           done < version-output.txt
@@ -86,7 +86,7 @@ jobs:
             - GHowe_串口调试助手.exe: 兼容版，保留 GUI/CLI 自动分流。
             - GHowe_串口调试助手_GUI.exe: GUI 版。
             - GHowe_串口调试助手_CLI.exe: CLI 版。
-            版本已通过 README 与 main.py 一致性校验。
+            版本已通过 README 与 version_info.py 一致性校验。
           files: |
             serial_tool_project/dist/GHowe_串口调试助手.exe
             serial_tool_project/dist/GHowe_串口调试助手_GUI.exe

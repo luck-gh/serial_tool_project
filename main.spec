@@ -14,9 +14,13 @@ workspace_dir = os.path.dirname(spec_dir)
 
 pathex = []
 gui_hiddenimports = []
-gui_datas = [(os.path.join(spec_dir, 'resources'), 'resources')]
+documentation_datas = [
+    (os.path.join(spec_dir, 'docs', 'OPERATION_MANUAL_FOR_GUI.md'), 'docs'),
+    (os.path.join(spec_dir, 'docs', 'OPERATION_MANUAL_FOR_CLI.md'), 'docs'),
+]
+gui_datas = [(os.path.join(spec_dir, 'resources'), 'resources')] + documentation_datas
 cli_hiddenimports = []
-cli_datas = []
+cli_datas = list(documentation_datas)
 
 def env_enabled(env_name, default):
     value = os.environ.get(env_name, '').lower().strip()

@@ -11,12 +11,12 @@ Website: www.GuoHowe.com
 
 import sys
 import os
+import signal
 from PyQt5.QtWidgets import (QApplication, QStyleFactory)
+from PyQt5.QtCore import QTimer
 from main_window import SerialTool
 from core.cli_runner import build_parser, run_cli, should_run_cli
-from version_info import TOOL_VERSION_DATE
-
-TOOL_VERSION = "1.2.1"
+from version_info import TOOL_VERSION, TOOL_VERSION_DATE
 
 
 def hide_console_for_gui():
@@ -52,6 +52,12 @@ def main():
     hide_console_for_gui()
 
     app = QApplication(sys.argv)
+
+    # 让开发环境中的 Ctrl+C 通过 Qt 事件循环安全退出，避免强制中断原生控件。
+    signal.signal(signal.SIGINT, lambda *_args: app.quit())
+    signal_timer = QTimer()
+    signal_timer.timeout.connect(lambda: None)
+    signal_timer.start(200)
 
     # 设置应用程序样式
     app.setStyle(QStyleFactory.create('Fusion'))

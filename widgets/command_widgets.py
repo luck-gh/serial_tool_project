@@ -19,13 +19,15 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLineEdit, QTableWidget, QCh
                              QHeaderView, QTableWidgetItem, QAction, QInputDialog, QMessageBox,
                              QDialog, QHBoxLayout, QVBoxLayout, QLabel, QDialogButtonBox, QTextEdit,
                              QComboBox)
-from PyQt5.QtCore import Qt, QRegExp
+from PyQt5.QtCore import Qt, QRegExp, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics, QRegExpValidator
 
 from utils.ui_utils import UIUtils, Colors, resource_path
 from widgets.base_widgets import BaseWidgetMixin
 from dialogs.comment_edit_dialog import CommentEditDialog
+from dialogs.replacement_rule_dialog import ReplacementRuleDialog
 from managers.config_manager import ConfigManager
+from core.text_search import normalize_rule
 
 class HexInputDialog(QDialog):
     """SendHex 专用输入对话框，支持实时格式化"""
@@ -242,6 +244,8 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         super().__init__(parent)
         self.config_manager = config_manager
         self.comment_text = ""
+        self.command_table = None
+        self.row_index = -1
 
         # 设置上下文菜单策略为自定义
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -344,6 +348,31 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         select_all_action.triggered.connect(self.selectAll)
         menu.addAction(select_all_action)
 
+        if self.command_table is not None and self.row_index >= 0:
+            menu.addSeparator()
+            target_rows = self.command_table.get_replacement_target_rows(self.row_index)
+            multiple_rows = len(target_rows) > 1
+            replacement_action = QAction(
+                "设置选中行替换规则..." if multiple_rows else "设置本行替换规则...",
+                self,
+            )
+            replacement_action.triggered.connect(
+                lambda: self.command_table.edit_replacement_rules(target_rows)
+            )
+            menu.addAction(replacement_action)
+
+            clear_replacement_action = QAction(
+                "清除选中行替换规则" if multiple_rows else "清除本行替换规则",
+                self,
+            )
+            clear_replacement_action.setEnabled(
+                any(self.command_table.get_replacement_rule(row) for row in target_rows)
+            )
+            clear_replacement_action.triggered.connect(
+                lambda: self.command_table.set_replacement_rules(target_rows, None)
+            )
+            menu.addAction(clear_replacement_action)
+
         # --- 外部工具：数字转换器 ---
         selected_text = self.selectedText().strip() if self.hasSelectedText() else None
         self.add_number_converter_actions(menu, self.config_manager, selected_text)
@@ -359,6 +388,9 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
 
 class CommandTableWidget(QTableWidget, BaseWidgetMixin):
     """命令表格控件"""
+    commandsChanged = pyqtSignal(int)
+    replacementRulesChanged = pyqtSignal()
+
     def __init__(self, config_manager: ConfigManager, parent=None):
         super().__init__(parent)
         self.config_manager = config_manager
@@ -396,10 +428,42 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                 background-color: #2196F3;
                 color: white;
             }}
+            QLineEdit[commandEditor="true"][rowParity="even"] {{
+                background-color: {Colors.TABLE_EVEN_ROW};
+            }}
+            QLineEdit[commandEditor="true"][rowParity="odd"] {{
+                background-color: {Colors.TABLE_ODD_ROW};
+            }}
+            QLineEdit[commandEditor="true"][hasReplacementRuleStyle="true"] {{
+                border: 2px solid {Colors.PURPLE_BUTTON};
+            }}
+            QPushButton[commandSendButton="true"] {{
+                background-color: {Colors.BLUE_BUTTON};
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 5px;
+            }}
+            QPushButton[commandSendButton="true"]:hover {{
+                background-color: #1976D2;
+            }}
+            QPushButton[commandSendButton="true"]:pressed {{
+                background-color: #0D47A1;
+            }}
+            QPushButton[commandSendButton="true"][replaceableStyle="true"] {{
+                background-color: {Colors.PURPLE_BUTTON};
+            }}
+            QPushButton[commandSendButton="true"][replaceableStyle="true"]:hover {{
+                background-color: {Colors.PURPLE_BUTTON_DARK};
+            }}
+            QPushButton[commandSendButton="true"][replaceableStyle="true"]:pressed {{
+                background-color: #4A148C;
+            }}
         """)
 
         # 存储注释数据
         self.comments = {}
+        self.replacement_rules = {}
 
     def add_command_row(self, enable=False, command="", comment="", row_index=None):
         """添加命令行"""
@@ -422,40 +486,24 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         # 命令编辑框 (使用自定义控件)
         # 命令编辑框-右键菜单
         command_edit = CommandLineEdit(self.config_manager)
-        # 先连接信号再设置文本，确保初始文本也能触发格式化
-        # 注意：textChanged 信号会传递一个字符串参数，需要用 lambda _ 接收并忽略它
-        command_edit.textChanged.connect(lambda _: self.on_command_changed(row_index))
+        command_edit.command_table = self
+        command_edit.row_index = row_index
         command_edit.setText(command)
-        command_edit.set_comment(comment)
+        command_edit.textChanged.connect(lambda _: self.on_command_changed(row_index))
         # 回车发送功能
         command_edit.returnPressed.connect(lambda: self.on_return_pressed(row_index))
 
-        # 根据行号设置输入框背景色
-        if row_index % 2 == 0:
-            command_edit.setStyleSheet(f"background-color: {Colors.TABLE_EVEN_ROW};")
-        else:
-            command_edit.setStyleSheet(f"background-color: {Colors.TABLE_ODD_ROW};")
+        command_edit.setProperty("commandEditor", True)
+        command_edit.setProperty("rowParity", "even" if row_index % 2 == 0 else "odd")
+        command_edit.setProperty("hasReplacementRuleStyle", False)
 
         self.setCellWidget(row_index, 1, command_edit)
 
         # 发送按钮
         send_btn = QPushButton(f"{row_index + 1}")
         send_btn.setFixedWidth(60)
-        send_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BLUE_BUTTON};
-                color: white;
-                border: none;
-                border-radius: 3px;
-                padding: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: #1976D2;
-            }}
-            QPushButton:pressed {{
-                background-color: #0D47A1;
-            }}
-        """)
+        send_btn.setProperty("commandSendButton", True)
+        self._set_send_button_style(send_btn, False)
         self.setCellWidget(row_index, 2, send_btn)
 
         # --- DPI-Aware 动态行高 ---
@@ -485,6 +533,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
         # 连接发送按钮
         self.connect_send_button(row_index, send_btn)
+        self.on_command_changed(row_index)
 
         return send_btn
 
@@ -549,6 +598,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
         comment = self.comments.get(row, "")
         command_edit.set_comment(comment)
+        self.commandsChanged.emit(row)
 
     def on_checkbox_toggled(self, state, row):
         """当勾选框状态改变时，如果该行在选中范围内，同步更新其他选中行"""
@@ -593,10 +643,120 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             commands.append((enable, command, comment))
         return commands
 
+    def get_replacement_rule(self, row):
+        return self.replacement_rules.get(row)
+
+    def set_replacement_rule(self, row, rule):
+        self.set_replacement_rules([row], rule)
+
+    def set_replacement_rules(self, rows, rule):
+        rule = normalize_rule(rule)
+        valid_rows = sorted({row for row in rows if 0 <= row < self.rowCount()})
+        for row in valid_rows:
+            if rule:
+                self.replacement_rules[row] = rule.copy()
+                self.replacement_rules[row]["options"] = rule["options"].copy()
+            else:
+                self.replacement_rules.pop(row, None)
+            self.update_row_replacement_indicator(row)
+        self.replacementRulesChanged.emit()
+
+    def edit_replacement_rule(self, row):
+        self.edit_replacement_rules([row])
+
+    def edit_replacement_rules(self, rows):
+        rows = sorted({row for row in rows if 0 <= row < self.rowCount()})
+        if not rows:
+            return
+        existing_rules = [self.get_replacement_rule(row) for row in rows]
+        initial_rule = existing_rules[0] if all(rule == existing_rules[0] for rule in existing_rules) else None
+        title = (
+            f"选中 {len(rows)} 行替换规则"
+            if len(rows) > 1
+            else f"第 {rows[0] + 1} 行替换规则"
+        )
+        dialog = ReplacementRuleDialog(
+            initial_rule,
+            title=title,
+            parent=self,
+        )
+        if dialog.exec_() == QDialog.Accepted:
+            self.set_replacement_rules(
+                rows,
+                None if dialog.clear_requested else dialog.get_rule(),
+            )
+
+    def get_replacement_target_rows(self, row):
+        selected_rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        if len(selected_rows) > 1 and row in selected_rows:
+            return selected_rows
+        return [row]
+
+    def get_replacement_rules(self):
+        return {str(row): rule for row, rule in self.replacement_rules.items()}
+
+    def load_replacement_rules(self, rules, notify=True):
+        self.replacement_rules = {}
+        for row, rule in (rules or {}).items():
+            try:
+                row_index = int(row)
+            except (TypeError, ValueError):
+                continue
+            normalized = normalize_rule(rule)
+            if normalized and 0 <= row_index < self.rowCount():
+                self.replacement_rules[row_index] = normalized
+        self.update_all_replacement_indicators()
+        if notify:
+            self.replacementRulesChanged.emit()
+
+    def update_row_replacement_indicator(self, row):
+        edit = self.cellWidget(row, 1)
+        if not edit:
+            return
+        parity = "even" if row % 2 == 0 else "odd"
+        has_rule = row in self.replacement_rules
+        style_changed = (
+            edit.property("rowParity") != parity
+            or edit.property("hasReplacementRuleStyle") != has_rule
+        )
+        if not style_changed:
+            return
+        edit.setProperty("rowParity", parity)
+        edit.setProperty("hasReplacementRuleStyle", has_rule)
+        if has_rule:
+            edit.setToolTip("本行已设置独立替换规则")
+        else:
+            edit.setToolTip("")
+        edit.style().unpolish(edit)
+        edit.style().polish(edit)
+        edit.update()
+
+    def update_all_replacement_indicators(self):
+        for row in range(self.rowCount()):
+            self.update_row_replacement_indicator(row)
+
+    def _set_send_button_style(self, button, replaceable):
+        if button.property("replaceableStyle") == replaceable:
+            return
+        had_style = button.property("replaceableStyle") is not None
+        button.setProperty("replaceableStyle", replaceable)
+        if had_style:
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+
+    def set_send_button_replaceable(self, row, replaceable):
+        button = self.cellWidget(row, 2)
+        if button:
+            self._set_send_button_style(button, replaceable)
+
     def clear_all(self):
         """清空所有行"""
         self.setRowCount(0)
         self.comments.clear()
+        self.replacement_rules.clear()
+        self.commandsChanged.emit(-1)
+        self.replacementRulesChanged.emit()
 
     def show_context_menu(self, position):
         """显示表格行右键菜单"""
@@ -618,6 +778,29 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         edit_comment_action = QAction("修改注释", self)
         edit_comment_action.triggered.connect(lambda: self.edit_comment(row))
         menu.addAction(edit_comment_action)
+
+        replacement_target_rows = self.get_replacement_target_rows(row)
+        multiple_replacement_rows = len(replacement_target_rows) > 1
+        replacement_action = QAction(
+            "设置选中行替换规则..." if multiple_replacement_rows else "设置本行替换规则...",
+            self,
+        )
+        replacement_action.triggered.connect(
+            lambda: self.edit_replacement_rules(replacement_target_rows)
+        )
+        menu.addAction(replacement_action)
+
+        clear_replacement_action = QAction(
+            "清除选中行替换规则" if multiple_replacement_rows else "清除本行替换规则",
+            self,
+        )
+        clear_replacement_action.setEnabled(
+            any(self.get_replacement_rule(target_row) for target_row in replacement_target_rows)
+        )
+        clear_replacement_action.triggered.connect(
+            lambda: self.set_replacement_rules(replacement_target_rows, None)
+        )
+        menu.addAction(clear_replacement_action)
 
         # 特殊指令
         special_command_action = QAction("特殊指令", self)
@@ -886,6 +1069,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             else:  # old_row >= row
                 new_comments[old_row + count] = comment
         self.comments = new_comments
+        self.replacement_rules = {
+            (old_row if old_row < row else old_row + count): rule
+            for old_row, rule in self.replacement_rules.items()
+        }
 
         for i in range(count):
             self.add_command_row(False, "", "", row + i)
@@ -923,6 +1110,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             else:
                 new_comments[old_row + count] = comment
         self.comments = new_comments
+        self.replacement_rules = {
+            (old_row if old_row < row else old_row + count): rule
+            for old_row, rule in self.replacement_rules.items()
+        }
 
         self.setUpdatesEnabled(False)
         try:
@@ -962,6 +1153,11 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             elif old_row > row:
                 new_comments[old_row - 1] = self.comments[old_row]
         self.comments = new_comments
+        self.replacement_rules = {
+            (old_row if old_row < row else old_row - 1): rule
+            for old_row, rule in self.replacement_rules.items()
+            if old_row != row
+        }
 
         # 更新发送按钮编号和连接
         self.update_send_buttons_after_row(row)
@@ -995,6 +1191,11 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             offset = len([r for r in rows_to_delete if r < old_row])
             new_comments[old_row - offset] = comment
         self.comments = new_comments
+        self.replacement_rules = {
+            old_row - len([deleted_row for deleted_row in rows_to_delete if deleted_row < old_row]): rule
+            for old_row, rule in self.replacement_rules.items()
+            if old_row not in rows_to_delete
+        }
 
         # 更新发送按钮编号和连接
         self.update_send_buttons_after_row(min_affected_row)
@@ -1034,6 +1235,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             # 更新编辑框
             edit = self.cellWidget(row, 1)
             if edit:
+                edit.row_index = row
                 # 更新回车连接
                 try:
                     edit.returnPressed.disconnect()
@@ -1049,8 +1251,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                 # 注意：textChanged 信号会传递一个字符串参数，需要用 lambda _, r=row 接收
                 edit.textChanged.connect(lambda _, r=row: self.on_command_changed(r))
                 
-                # 更新背景颜色以保持交替效果
-                if row % 2 == 0:
-                    edit.setStyleSheet(f"background-color: {Colors.TABLE_EVEN_ROW};")
-                else:
-                    edit.setStyleSheet(f"background-color: {Colors.TABLE_ODD_ROW};")
+                self.update_row_replacement_indicator(row)
+
+        self.commandsChanged.emit(-1)
+        self.replacementRulesChanged.emit()

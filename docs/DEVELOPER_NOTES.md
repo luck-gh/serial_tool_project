@@ -23,43 +23,44 @@
 
 ```
 serial_tool_project/
-├── main.py                          # 兼容入口, 根据参数分流 GUI/CLI
-├── gui_main.py                      # GUI 专用入口
-├── cli_main.py                      # CLI 专用入口
-├── version_info.py                  # GUI/CLI 共用版本信息
-├── app_identity.py                  # 可执行文件名和配置文件名转换
-├── main_window.py                   # 主窗口 UI 和核心交互逻辑
-├── main.spec                        # PyInstaller 打包配置
-├── main_config.json                 # 应用程序配置文件 (自动生成)
-├── resources/                       # 资源文件
+├── main.py                         # 兼容入口, 根据参数分流 GUI/CLI
+├── gui_main.py                     # GUI 专用入口
+├── cli_main.py                     # CLI 专用入口
+├── version_info.py                 # GUI/CLI 共用版本信息
+├── app_identity.py                 # 可执行文件名和配置文件名转换
+├── main_window.py                  # 主窗口 UI 和核心交互逻辑
+├── main.spec                       # PyInstaller 打包配置
+├── main_config.json                # 应用程序配置文件 (自动生成)
+├── resources/                      # 资源文件
 │   └── HOWE_LOGO.ico               # 应用程序图标
-├── core/                            # 核心功能模块
+├── core/                           # 核心功能模块
 │   ├── __init__.py
 │   ├── cli_runner.py               # CLI 模式入口和命令执行
 │   ├── command_executor.py         # GUI/CLI 共用的命令模块解析
 │   ├── output_rules.py             # GUI/CLI 共用的输出规则和文案
 │   ├── remote_control.py           # 局域网远程串口控制
 │   └── serial_thread.py            # 串口通信线程
-├── managers/                        # 功能管理模块
+├── managers/                       # 功能管理模块
 │   ├── __init__.py
 │   ├── config_manager.py           # 配置管理器 (工具注册表)
 │   ├── output_manager.py           # Qt 接收区输出写入器
 │   └── special_command_manager.py  # 特殊指令管理器
-├── widgets/                         # 自定义 UI 控件
+├── widgets/                        # 自定义 UI 控件
 │   ├── __init__.py
 │   ├── base_widgets.py             # 基础控件混入类
 │   ├── custom_widgets.py           # 自定义控件库
 │   └── command_widgets.py          # 命令表格控件
-├── utils/                           # 辅助工具和 UI 样式
+├── utils/                          # 辅助工具和 UI 样式
 │   ├── __init__.py
 │   └── ui_utils.py                 # UI 工具类、枚举、颜色常量
-├── dialogs/                         # 交互对话框
+├── dialogs/                        # 交互对话框
 │   ├── __init__.py
 │   ├── config_dialog.py            # 配置对话框 (工具设置)
 │   └── comment_edit_dialog.py      # 注释编辑对话框
-└── docs/                            # 文档目录
+└── docs/                           # 文档目录
     ├── VERSION_HISTORY.md          # 版本更新记录
-    ├── COMMAND_LINE_USAGE.md       # 命令行使用指南
+    ├── OPERATION_MANUAL_FOR_GUI.md # GUI 操作手册
+    ├── OPERATION_MANUAL_FOR_CLI.md # CLI 操作手册
     └── DEVELOPER_NOTES.md          # 开发者笔记 (本文档)
 ```
 
@@ -235,27 +236,27 @@ main.py
    ↓
 main_window.py (主窗口)
    ↓
-┌──────────────────────────────────────────┐
-│                                          │
-├─ managers/                               │
-│  ├─ config_manager.py (配置管理)         │
-│  ├─ output_manager.py (输出管理)         │
-│  └─ special_command_manager.py (指令管理)│
-│                                          │
-├─ widgets/                                │
-│  ├─ custom_widgets.py (自定义控件)       │
-│  └─ command_widgets.py (命令表格)        │
-│                                          │
-├─ core/                                   │
-│  └─ serial_thread.py (串口线程)          │
-│                                          │
-├─ dialogs/                                │
-│  ├─ config_dialog.py (配置对话框)        │
-│  └─ comment_edit_dialog.py (注释对话框)  │
-│                                          │
-└─ utils/                                  │
-   └─ ui_utils.py (UI 工具类)              │
-                                           │
+┌──────────────────────────────────────────
+│
+├─ managers/
+│  ├─ config_manager.py (配置管理)
+│  ├─ output_manager.py (输出管理)
+│  └─ special_command_manager.py (指令管理)
+│
+├─ widgets/
+│  ├─ custom_widgets.py (自定义控件)
+│  └─ command_widgets.py (命令表格)
+│                                          
+├─ core/
+│  └─ serial_thread.py (串口线程)
+│
+├─ dialogs/
+│  ├─ config_dialog.py (配置对话框)
+│  └─ comment_edit_dialog.py (注释对话框)
+│
+└─ utils/
+   └─ ui_utils.py (UI 工具类)
+
 ```
 
 ---
@@ -865,12 +866,9 @@ class TestSerialCommunication(unittest.TestCase):
 如有技术问题或建议，欢迎通过以下方式联系:
 
 - **Issue**: 提交到项目仓库
-- **Email**: [待添加]
-- **讨论区**: [待添加]
-
+- **Email**: 844396800@qq.com
 ---
 
 <p align="center">
   <i>感谢所有贡献者！</i>
 </p>
-

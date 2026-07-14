@@ -19,19 +19,22 @@ from collections import OrderedDict
 
 import serial
 import serial.tools.list_ports
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QGroupBox, QLabel, QComboBox, QPushButton, QCheckBox,
                              QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView,
                              QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QFrame,
                              QMessageBox, QFileDialog, QDialog, QDialogButtonBox, QTextEdit,
                              QSplitter, QMenu, QAction, QSizePolicy, QStyleFactory, QInputDialog,
-                             QProgressDialog, QStyle)
+                             QProgressDialog, QStyle, QShortcut)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
-from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette
+from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette, QKeySequence
 
 from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource, SpecialCommandType
 from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox, ClickableComboBox
 from widgets.command_widgets import CommandRowsTextParser, CommandTableWidget
+from widgets.find_widgets import FindBar
+from dialogs.replacement_rule_dialog import ReplacementRuleDialog
+from dialogs.help_dialog import HelpDialog
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
 from core.serial_thread import SerialThread
@@ -41,12 +44,22 @@ from app_identity import get_config_file
 from managers.config_manager import ConfigManager
 from dialogs.config_dialog import ConfigDialog
 from widgets.base_widgets import BaseWidgetMixin
+from core.text_search import find_matches, can_replace, replace_text, normalize_rule
 
 class SerialTool(QMainWindow, BaseWidgetMixin):
     """串口调试工具主窗口"""
     LEFT_PORT_COMBO_VISIBLE_CHARS = 7
     LEFT_PANEL_DEFAULT_EXTRA_WIDTH = 60
     SYNC_BUTTON_WIDTH = 30
+    DEFAULT_GLOBAL_REPLACEMENT_RULE = {
+        "find": r"write (\d) (0x\w*) \w*",
+        "replace": "read $1 $2 1",
+        "options": {
+            "case_sensitive": False,
+            "use_regex": True,
+            "whole_word": False,
+        },
+    }
 
     def __init__(self, tool_version="0.0.0", tool_version_date="N/A", exe_name="main"):
         super().__init__()
@@ -66,6 +79,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.is_continuous_sending = False
         self.current_module = "全部"
         self.modules = OrderedDict()  # 存储模块信息
+        self.global_replacement_rule = normalize_rule(self.DEFAULT_GLOBAL_REPLACEMENT_RULE)
+        self.receive_find_matches = []
+        self.receive_find_index = -1
+        self.send_find_matches = []
+        self.send_find_index = -1
+        self.send_find_highlight_row = None
+        self.last_find_target = "receive"
+        self.help_dialog = None
 
         # 使用规范化后的可执行文件名来构建配置文件名。
         config_file = get_config_file(self.exe_name)
@@ -446,6 +467,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         # 打开串口按钮
         self.connect_btn = QPushButton("打开串口")
+        self.connect_btn.setToolTip("打开/关闭串口 (Ctrl+O)")
         self._set_left_control_expanding(self.connect_btn)
         self.connect_btn.setStyleSheet(f"""
             QPushButton {{
@@ -563,48 +585,63 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.ending_combo.setCurrentText(r"\r\n")
         self._set_left_control_expanding(self.ending_combo)
         self.ending_combo.installEventFilter(self)          # 禁用滚轮
-        send_layout.addWidget(QLabel("结尾标识符:"))
-        send_layout.addWidget(self.ending_combo)
+        # 发送选项统一使用两列网格：左侧对齐，右侧随侧栏宽度伸缩。
+        send_options_grid = QGridLayout()
+        send_options_grid.setContentsMargins(0, 0, 0, 0)
+        send_options_grid.setHorizontalSpacing(8)
+        send_options_grid.setVerticalSpacing(8)
+        send_options_grid.setColumnStretch(0, 0)
+        send_options_grid.setColumnStretch(1, 1)
+
+        ending_label = QLabel("结尾标识符")
+        send_options_grid.addWidget(ending_label, 0, 0)
+        send_options_grid.addWidget(self.ending_combo, 0, 1)
 
         # 显示发送字符串
-        show_send_layout = QHBoxLayout()
         self.show_send_check = QCheckBox("显示发送字符串")
         self.show_send_check.setChecked(False)
-        show_send_layout.addWidget(self.show_send_check)
+        send_options_grid.addWidget(self.show_send_check, 1, 0)
 
         self.send_color_combo = QComboBox()
         self.send_color_combo.addItems(["红色", "蓝色", "绿色", "紫色", "黑色"])
         self.send_color_combo.setCurrentText("红色")
         self._set_left_control_expanding(self.send_color_combo)
         self.send_color_combo.installEventFilter(self)      # 禁用滚轮
-        show_send_layout.addWidget(self.send_color_combo)
-        send_layout.addLayout(show_send_layout)
+        send_options_grid.addWidget(self.send_color_combo, 1, 1)
 
-        # 连续发送间隔
-        interval_layout = QHBoxLayout()
-        interval_layout.addWidget(QLabel("连续发送间隔(ms):"))
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(10, 10000)
-        self.interval_spin.setValue(100)
-        self.interval_spin.installEventFilter(self)
-        self._set_left_control_expanding(self.interval_spin)
-        interval_layout.addWidget(self.interval_spin)
-        send_layout.addLayout(interval_layout)
+        self.replace_send_check = QCheckBox("替换发送")
+        self.replace_send_check.setToolTip("仅在发送瞬间替换字符串，快捷键 Ctrl+T")
+        send_options_grid.addWidget(self.replace_send_check, 2, 0)
+        self.replacement_rule_btn = QPushButton("全局规则...")
+        self._set_left_control_expanding(self.replacement_rule_btn)
+        self._bind_momentary_button_feedback(
+            self.replacement_rule_btn,
+            Colors.PURPLE_BUTTON,
+            Colors.PURPLE_BUTTON_DARK,
+        )
+        send_options_grid.addWidget(self.replacement_rule_btn, 2, 1)
 
         # 循环发送设置
-        loop_layout = QHBoxLayout()
-        self.loop_send_check = QCheckBox("循环发送")
+        self.loop_send_check = QCheckBox("循环发送(ms)")
         self.loop_send_check.setChecked(False)
-        loop_layout.addWidget(self.loop_send_check)
-        
-        loop_layout.addWidget(QLabel("间隔(ms):"))
+        send_options_grid.addWidget(self.loop_send_check, 3, 0)
         self.loop_interval_spin = QSpinBox()
         self.loop_interval_spin.setRange(10, 60000)
         self.loop_interval_spin.setValue(1000)
         self.loop_interval_spin.installEventFilter(self)
         self._set_left_control_expanding(self.loop_interval_spin)
-        loop_layout.addWidget(self.loop_interval_spin)
-        send_layout.addLayout(loop_layout)
+        send_options_grid.addWidget(self.loop_interval_spin, 3, 1)
+
+        # 连续发送间隔
+        send_options_grid.addWidget(QLabel("连续发送间隔(ms)"), 4, 0)
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(10, 10000)
+        self.interval_spin.setValue(100)
+        self.interval_spin.installEventFilter(self)
+        self._set_left_control_expanding(self.interval_spin)
+        send_options_grid.addWidget(self.interval_spin, 4, 1)
+
+        send_layout.addLayout(send_options_grid)
 
         layout.addWidget(self.send_group)
 
@@ -656,12 +693,39 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         layout.addWidget(self.tools_group)
 
-        # 配置按钮
+        # 帮助与配置按钮
+        footer_layout = QHBoxLayout()
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(8)
+        footer_button_height = 36
+        footer_button_style = (
+            "font-size: 13px; font-weight: bold; padding: 0px; "
+            "border-radius: 4px;"
+        )
+
+        self.help_btn = QPushButton("?")
+        self.help_btn.setToolTip("打开帮助 (F1)")
+        self.help_btn.setAccessibleName("帮助")
+        self._bind_momentary_button_feedback(
+            self.help_btn,
+            Colors.BLUE_BUTTON,
+            extra_styles=footer_button_style,
+        )
+        footer_layout.addWidget(self.help_btn)
+
         self.config_btn = QPushButton("配置")
         self._set_left_control_expanding(self.config_btn)
         self.config_btn.setMinimumWidth(self.config_btn.sizeHint().width())
-        self._bind_momentary_button_feedback(self.config_btn, Colors.BLUE_BUTTON)
-        layout.addWidget(self.config_btn)
+        self._bind_momentary_button_feedback(
+            self.config_btn,
+            Colors.BLUE_BUTTON,
+            extra_styles=footer_button_style,
+        )
+        self.help_btn.setFixedSize(footer_button_height, footer_button_height)
+        self.config_btn.setFixedHeight(footer_button_height)
+
+        footer_layout.addWidget(self.config_btn, 1)
+        layout.addLayout(footer_layout)
 
         scroll_area.setMinimumWidth(self._left_panel_min_width())
         return scroll_area
@@ -687,6 +751,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             clear_callback=self.clear_receive_data
         )
         self.receive_browser.setFont(QFont("Consolas", 10))
+        self.receive_find_bar = FindBar()
+        self.receive_find_bar.hide()
+        receive_layout.addWidget(self.receive_find_bar)
         receive_layout.addWidget(self.receive_browser)
 
         # 发送编辑区
@@ -696,6 +763,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         # 表头
         header_layout = QHBoxLayout()
         send_layout.addLayout(header_layout)
+
+        self.send_find_bar = FindBar(show_scope=True)
+        self.send_find_bar.hide()
+        send_layout.addWidget(self.send_find_bar)
 
         # 命令表格
         self.command_table = CommandTableWidget(self.config_manager)
@@ -772,6 +843,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         continuous_layout.addWidget(self.send_module_combo, 1)
 
         self.continuous_btn = QPushButton("连续发送")
+        self.continuous_btn.setToolTip("开始/停止连续发送 (Ctrl+R)")
         self._set_action_button_running(self.continuous_btn, False, Colors.GREEN_BUTTON)
         continuous_layout.addWidget(self.continuous_btn)
 
@@ -810,10 +882,38 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.export_btn.clicked.connect(self.export_template)
         self.refresh_modules_btn.clicked.connect(self.refresh_modules)
         self.config_btn.clicked.connect(self.open_config_dialog)
+        self.help_btn.clicked.connect(self.open_help_dialog)
         self.jump_to_module_btn.clicked.connect(self._jump_to_module_row)
         self.jump_row_btn.clicked.connect(self._jump_to_row)
         self.sync_mode_forward_btn.clicked.connect(self._sync_mode_forward_selection)
         self.sync_mode_btn.clicked.connect(self._sync_mode_selection)
+        self.replace_send_check.toggled.connect(self.update_replacement_mode_ui)
+        self.replacement_rule_btn.clicked.connect(self.edit_global_replacement_rule)
+        self.command_table.commandsChanged.connect(self._on_command_table_changed)
+        self.command_table.replacementRulesChanged.connect(self.update_replacement_mode_ui)
+        self.receive_browser.textChanged.connect(self._refresh_receive_find_if_visible)
+        self.receive_find_bar.searchChanged.connect(self._search_receive_text)
+        self.receive_find_bar.navigateRequested.connect(self._navigate_receive_find)
+        self.receive_find_bar.closed.connect(self._clear_receive_find)
+        self.send_find_bar.searchChanged.connect(self._search_send_commands)
+        self.send_find_bar.navigateRequested.connect(self._navigate_send_find)
+        self.send_find_bar.closed.connect(self._clear_send_find)
+
+        self.find_shortcut = QShortcut(QKeySequence.Find, self)
+        self.find_shortcut.setContext(Qt.WindowShortcut)
+        self.find_shortcut.activated.connect(self.open_context_find)
+        self.replace_mode_shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
+        self.replace_mode_shortcut.setContext(Qt.WindowShortcut)
+        self.replace_mode_shortcut.activated.connect(self.toggle_replacement_mode)
+        self.help_shortcut = QShortcut(QKeySequence.HelpContents, self)
+        self.help_shortcut.setContext(Qt.WindowShortcut)
+        self.help_shortcut.activated.connect(self.open_help_dialog)
+        self.serial_toggle_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
+        self.serial_toggle_shortcut.setContext(Qt.WindowShortcut)
+        self.serial_toggle_shortcut.activated.connect(self.toggle_serial_connection)
+        self.continuous_send_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.continuous_send_shortcut.setContext(Qt.WindowShortcut)
+        self.continuous_send_shortcut.activated.connect(self.toggle_continuous_send)
 
         # 连接工具按钮（动态连接，基于工具名映射到方法）
         tool_method_map = {
@@ -1359,6 +1459,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.output_manager.append_text("配置已更新", OutputSource.SYSTEM)
             self.update_tools_state()
 
+    def open_help_dialog(self):
+        """打开帮助窗口，并重新载入最新的 README 内容。"""
+        if self.help_dialog is None:
+            self.help_dialog = HelpDialog(self)
+        self.help_dialog.reload_content()
+        self.help_dialog.show()
+        self.help_dialog.raise_()
+        self.help_dialog.activateWindow()
+
 
     def get_send_color(self):
         """获取发送文本颜色"""
@@ -1391,6 +1500,248 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         else:
             return ending.encode('utf-8').decode('unicode_escape').encode('utf-8')
 
+    def open_context_find(self):
+        """根据当前焦点打开接收区或发送区的独立查找栏。"""
+        focus = QApplication.focusWidget()
+        if focus is self.receive_browser or (
+            focus is not None and self.receive_browser.isAncestorOf(focus)
+        ):
+            self.last_find_target = "receive"
+        elif focus is self.command_table or (
+            focus is not None and self.command_table.isAncestorOf(focus)
+        ):
+            self.last_find_target = "send"
+
+        if self.last_find_target == "send":
+            selected = focus.selectedText() if hasattr(focus, "selectedText") else ""
+            self.send_find_bar.show_and_focus(selected)
+        else:
+            cursor = self.receive_browser.textCursor()
+            selected = cursor.selectedText() if cursor.hasSelection() else ""
+            self.receive_find_bar.show_and_focus(selected)
+
+    def _search_receive_text(self, query, options, _scope="全部"):
+        self.receive_find_matches = []
+        self.receive_find_index = -1
+        try:
+            self.receive_find_matches = find_matches(
+                self.receive_browser.toPlainText(), query, options
+            )
+        except ValueError as exc:
+            self.receive_find_bar.set_result(0, 0, str(exc))
+            self.receive_browser.setExtraSelections([])
+            return
+
+        if self.receive_find_matches:
+            self.receive_find_index = 0
+        self._render_receive_find()
+
+    def _render_receive_find(self):
+        selections = []
+        for index, (start, end) in enumerate(self.receive_find_matches):
+            selection = QTextEdit.ExtraSelection()
+            cursor = self.receive_browser.textCursor()
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            selection.cursor = cursor
+            selection.format.setBackground(
+                QColor("#FF9800" if index == self.receive_find_index else "#FFF59D")
+            )
+            selections.append(selection)
+        self.receive_browser.setExtraSelections(selections)
+
+        total = len(self.receive_find_matches)
+        current = self.receive_find_index + 1 if total else 0
+        self.receive_find_bar.set_result(current, total)
+        if total:
+            start, end = self.receive_find_matches[self.receive_find_index]
+            cursor = self.receive_browser.textCursor()
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            self.receive_browser.setTextCursor(cursor)
+            self.receive_browser.ensureCursorVisible()
+
+    def _navigate_receive_find(self, direction):
+        if not self.receive_find_matches:
+            return
+        self.receive_find_index = (
+            self.receive_find_index + direction
+        ) % len(self.receive_find_matches)
+        self._render_receive_find()
+
+    def _clear_receive_find(self):
+        self.receive_find_matches = []
+        self.receive_find_index = -1
+        self.receive_browser.setExtraSelections([])
+
+    def _refresh_receive_find_if_visible(self):
+        if self.receive_find_bar.isVisible():
+            self.receive_find_bar._emit_search()
+
+    def _send_find_rows(self, scope):
+        if scope == "全部":
+            return range(self.command_table.rowCount())
+        return self.modules.get(scope, [])
+
+    def _search_send_commands(self, query, options, scope="全部"):
+        self.send_find_matches = []
+        self.send_find_index = -1
+        try:
+            if query:
+                for row in self._send_find_rows(scope):
+                    command_edit = self.command_table.cellWidget(row, 1)
+                    if not command_edit:
+                        continue
+                    for start, end in find_matches(command_edit.text(), query, options):
+                        self.send_find_matches.append((row, start, end))
+        except ValueError as exc:
+            self.send_find_bar.set_result(0, 0, str(exc))
+            return
+
+        if self.send_find_matches:
+            self.send_find_index = 0
+        self._render_send_find()
+
+    def _render_send_find(self):
+        total = len(self.send_find_matches)
+        current = self.send_find_index + 1 if total else 0
+        self.send_find_bar.set_result(current, total)
+        if not total:
+            self._clear_send_find_highlight()
+            return
+
+        row, start, end = self.send_find_matches[self.send_find_index]
+        if self.send_find_highlight_row != row:
+            self._clear_send_find_highlight()
+        command_edit = self.command_table.cellWidget(row, 1)
+        if command_edit:
+            self.command_table.scrollTo(
+                self.command_table.model().index(row, 1),
+                QTableWidget.PositionAtCenter,
+            )
+            self.send_find_highlight_row = row
+            self.send_find_bar.search_input.setFocus(Qt.OtherFocusReason)
+            QTimer.singleShot(
+                0,
+                lambda r=row, s=start, e=end: self._apply_send_find_highlight(r, s, e),
+            )
+
+    def _apply_send_find_highlight(self, row, start, end):
+        if not self.send_find_matches or self.send_find_index < 0:
+            return
+        if self.send_find_matches[self.send_find_index] != (row, start, end):
+            return
+        command_edit = self.command_table.cellWidget(row, 1)
+        if not command_edit:
+            return
+        palette = command_edit.palette()
+        for color_group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+            palette.setColor(color_group, QPalette.Highlight, QColor("#FFEB3B"))
+            palette.setColor(color_group, QPalette.HighlightedText, QColor("#000000"))
+        command_edit.setPalette(palette)
+        command_edit.setSelection(start, end - start)
+
+    def _navigate_send_find(self, direction):
+        if not self.send_find_matches:
+            return
+        self.send_find_index = (
+            self.send_find_index + direction
+        ) % len(self.send_find_matches)
+        self._render_send_find()
+
+    def _clear_send_find(self):
+        self._clear_send_find_highlight()
+        self.send_find_matches = []
+        self.send_find_index = -1
+
+    def _clear_send_find_highlight(self):
+        row = self.send_find_highlight_row
+        if row is not None and 0 <= row < self.command_table.rowCount():
+            command_edit = self.command_table.cellWidget(row, 1)
+            if command_edit:
+                command_edit.deselect()
+        self.send_find_highlight_row = None
+
+    def _on_command_table_changed(self, row_index):
+        if self.send_find_bar.isVisible():
+            self.send_find_bar._emit_search()
+        if 0 <= row_index < self.command_table.rowCount():
+            _enable, command, _comment = self.command_table.get_row_data(row_index)
+            self.command_table.set_send_button_replaceable(
+                row_index, self._is_replaceable_command(command, row_index)
+            )
+        else:
+            self.update_replacement_mode_ui()
+
+    def toggle_replacement_mode(self):
+        self.replace_send_check.toggle()
+
+    def edit_global_replacement_rule(self):
+        dialog = ReplacementRuleDialog(
+            self.global_replacement_rule,
+            title="发送编辑区全局替换规则",
+            parent=self,
+        )
+        if dialog.exec_() == QDialog.Accepted:
+            self.global_replacement_rule = (
+                None if dialog.clear_requested else dialog.get_rule()
+            )
+            self.update_replacement_mode_ui()
+
+    def _effective_replacement_rule(self, row_index):
+        if row_index is not None:
+            row_rule = self.command_table.get_replacement_rule(row_index)
+            if row_rule:
+                return row_rule
+        return self.global_replacement_rule
+
+    def _is_replaceable_command(self, command, row_index):
+        if not self.replace_send_check.isChecked():
+            return False
+        cmd_type_str, _param = UIUtils.parse_special_command(command)
+        if cmd_type_str and any(ct.value == cmd_type_str for ct in SpecialCommandType):
+            return False
+        try:
+            return can_replace(
+                UIUtils.unescape_text(command),
+                self._effective_replacement_rule(row_index),
+            )
+        except ValueError:
+            return False
+
+    def update_replacement_mode_ui(self):
+        if not hasattr(self, "command_table"):
+            return
+        for row in range(self.command_table.rowCount()):
+            _enable, command, _comment = self.command_table.get_row_data(row)
+            self.command_table.set_send_button_replaceable(
+                row, self._is_replaceable_command(command, row)
+            )
+        self._update_continuous_button_style()
+
+    def _update_continuous_button_style(self):
+        if not hasattr(self, "continuous_btn"):
+            return
+        if self.is_continuous_sending:
+            color = Colors.RED_BUTTON
+        elif self.replace_send_check.isChecked():
+            color = Colors.PURPLE_BUTTON
+        else:
+            color = Colors.GREEN_BUTTON
+        self._apply_button_color(self.continuous_btn, color)
+
+    def _replace_outgoing_command(self, command, row_index):
+        if not self.replace_send_check.isChecked():
+            return command
+        try:
+            replaced, _matched = replace_text(
+                command, self._effective_replacement_rule(row_index)
+            )
+            return replaced
+        except ValueError as exc:
+            self.output_manager.append_text(f"错误: 替换规则无效: {exc}", OutputSource.ERROR)
+            return command
+
     def send_command(self, command, row_index=None):
         """发送命令"""
         if not self.can_send_serial_data():
@@ -1400,6 +1751,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return False
 
         try:
+            command = self._replace_outgoing_command(command, row_index)
             # 添加结尾标识符
             ending = self.get_ending_chars()
             full_command = command.encode('utf-8') + ending
@@ -1597,12 +1949,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         self.is_continuous_sending = True
         self.continuous_btn.setText("停止发送")
-        self.continuous_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.RED_BUTTON};
-                color: white;
-            }}
-        """)
+        self._update_continuous_button_style()
 
         # 添加系统消息显示当前发送的模块名称
         self.output_manager.append_text(f"开始连续发送模块: '{selected_module}'", OutputSource.SYSTEM)
@@ -1618,12 +1965,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             del self._force_no_loop
             
         self.continuous_btn.setText("连续发送")
-        self.continuous_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.GREEN_BUTTON};
-                color: white;
-            }}
-        """)
+        self._update_continuous_button_style()
         self.continuous_timer.stop()
 
     def send_continuous_commands(self):
@@ -1825,6 +2167,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if send_selection and self.send_module_combo.findText(send_selection) >= 0:
             self.send_module_combo.setCurrentText(send_selection)
 
+        if hasattr(self, "send_find_bar"):
+            self.send_find_bar.set_scopes(self.modules.keys())
+
         if not silent:
             self.output_manager.append_text("模块列表已刷新", OutputSource.SYSTEM)
 
@@ -1900,6 +2245,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """保存导入前模板状态，用于取消时回滚"""
         return {
             "commands": self.command_table.get_all_commands(),
+            "replacement_rules": self.command_table.get_replacement_rules(),
             "jump_module": self.jump_module_combo.currentText(),
             "send_module": self.send_module_combo.currentText(),
         }
@@ -1909,6 +2255,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.command_table.clear_all()
         for row, (enable, command, comment) in enumerate(snapshot["commands"]):
             self.command_table.add_command_row(enable, command, comment, row)
+        self.command_table.load_replacement_rules(snapshot.get("replacement_rules", {}))
         self.refresh_modules(silent=True)
 
         jump_module = snapshot.get("jump_module")
@@ -2222,6 +2569,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     "show_send": self.show_send_check.isChecked(),
                     "send_color": self.send_color_combo.currentText(),
                     "ending": self.ending_combo.currentText(),
+                    "replace_send": self.replace_send_check.isChecked(),
+                    "global_replacement_rule": self.global_replacement_rule,
                     "jump_module": self.jump_module_combo.currentText(),
                     "send_module": self.send_module_combo.currentText()
                 }),
@@ -2242,7 +2591,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         "tools": self.tools_group.isExpanded()
                     }
                 }),
-                ("commands", self.command_table.get_all_commands())
+                ("commands", self.command_table.get_all_commands()),
+                ("command_replacement_rules", self.command_table.get_replacement_rules())
             ])
             self.config_manager.set("state", state)
         except Exception as e:
@@ -2304,6 +2654,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.show_send_check.setChecked(send_settings.get("show_send", False))
             self.send_color_combo.setCurrentText(send_settings.get("send_color", "红色"))
             self.ending_combo.setCurrentText(send_settings.get("ending", r"\r\n"))
+            self.replace_send_check.setChecked(send_settings.get("replace_send", False))
+            if "global_replacement_rule" in send_settings:
+                self.global_replacement_rule = normalize_rule(
+                    send_settings.get("global_replacement_rule")
+                )
+            else:
+                self.global_replacement_rule = normalize_rule(
+                    self.DEFAULT_GLOBAL_REPLACEMENT_RULE
+                )
             
             # 5. 其他设置
             other_settings = state.get("other_settings", {})
@@ -2339,9 +2698,19 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 加载命令
             saved_commands = state.get("commands")
             if saved_commands:
-                self.command_table.clear_all()
-                for row, cmd_data in enumerate(saved_commands):
-                    self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
+                self.command_table.blockSignals(True)
+                self.command_table.setUpdatesEnabled(False)
+                try:
+                    self.command_table.clear_all()
+                    for row, cmd_data in enumerate(saved_commands):
+                        self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
+                finally:
+                    self.command_table.setUpdatesEnabled(True)
+                    self.command_table.blockSignals(False)
+                self.command_table.load_replacement_rules(
+                    state.get("command_replacement_rules", {}),
+                    notify=False,
+                )
                 self.refresh_modules()
 
                 # 恢复选择的模块
@@ -2361,6 +2730,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     self.send_module_combo.setCurrentText(send_module)
             else:
                 self.add_initial_commands(10)
+            self.update_replacement_mode_ui()
         except Exception as e:
             print(f"加载状态失败: {e}")
             if self.command_table.rowCount() == 0:
@@ -2424,9 +2794,16 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
             saved_commands = self.config_manager.get("saved_commands")
             if saved_commands:
-                self.command_table.clear_all()
-                for row, cmd_data in enumerate(saved_commands):
-                    self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
+                self.command_table.blockSignals(True)
+                self.command_table.setUpdatesEnabled(False)
+                try:
+                    self.command_table.clear_all()
+                    for row, cmd_data in enumerate(saved_commands):
+                        self.command_table.add_command_row(cmd_data[0], cmd_data[1], cmd_data[2], row)
+                finally:
+                    self.command_table.setUpdatesEnabled(True)
+                    self.command_table.blockSignals(False)
+                self.update_replacement_mode_ui()
                 self.refresh_modules()
                 selected_module = self.config_manager.get("selected_module")
                 if selected_module and self.jump_module_combo.findText(selected_module) >= 0:

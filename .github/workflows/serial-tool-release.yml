@@ -68,13 +68,25 @@ jobs:
         run: |
           pyinstaller --clean main.spec
 
+      - name: Add version to release file names
+        shell: bash
+        working-directory: serial_tool_project
+        env:
+          RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
+        run: |
+          mv "dist/GHowe_串口调试助手.exe" "dist/GHowe_串口调试助手_v${RELEASE_VERSION}.exe"
+          mv "dist/GHowe_串口调试助手_GUI.exe" "dist/GHowe_串口调试助手_GUI_v${RELEASE_VERSION}.exe"
+          mv "dist/GHowe_串口调试助手_CLI.exe" "dist/GHowe_串口调试助手_CLI_v${RELEASE_VERSION}.exe"
+
       - name: Verify exe files exist
         shell: bash
         working-directory: serial_tool_project
+        env:
+          RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
         run: |
-          test -f "dist/GHowe_串口调试助手.exe"
-          test -f "dist/GHowe_串口调试助手_GUI.exe"
-          test -f "dist/GHowe_串口调试助手_CLI.exe"
+          test -f "dist/GHowe_串口调试助手_v${RELEASE_VERSION}.exe"
+          test -f "dist/GHowe_串口调试助手_GUI_v${RELEASE_VERSION}.exe"
+          test -f "dist/GHowe_串口调试助手_CLI_v${RELEASE_VERSION}.exe"
 
       - name: Prepare release notes from tagged commit
         shell: bash
@@ -88,6 +100,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body_path: release-notes.md
           files: |
-            serial_tool_project/dist/GHowe_串口调试助手.exe
-            serial_tool_project/dist/GHowe_串口调试助手_GUI.exe
-            serial_tool_project/dist/GHowe_串口调试助手_CLI.exe
+            serial_tool_project/dist/GHowe_串口调试助手_v${{ steps.validate.outputs.tag_version }}.exe
+            serial_tool_project/dist/GHowe_串口调试助手_GUI_v${{ steps.validate.outputs.tag_version }}.exe
+            serial_tool_project/dist/GHowe_串口调试助手_CLI_v${{ steps.validate.outputs.tag_version }}.exe

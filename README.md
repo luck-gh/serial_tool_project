@@ -205,6 +205,8 @@ pyinstaller main.spec
 
 GUI、通用 EXE 和 CLI EXE 会打包 GUI/CLI 两份操作手册，便于随发布包分发。
 
+GitHub Release 上传时会在扩展名前追加版本号，例如 `GHowe_串口调试助手_GUI_v1.2.2.exe`；本地执行 `pyinstaller main.spec` 时仍使用上表中的文件名。
+
 ---
 
 ## 文档入口

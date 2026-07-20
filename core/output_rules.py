@@ -105,18 +105,27 @@ def rules_from_state(state):
     """从配置 state 创建输出规则."""
     state = state or {}
     receive_settings = state.get("receive_settings", {})
+    display_sources = receive_settings.get("display_sources") or {}
     send_settings = state.get("send_settings", {})
     other_settings = state.get("other_settings", {})
 
     def source_filter(source_type):
         if source_type == OutputSource.SEND:
-            return receive_settings.get("show_send_source", True)
+            return display_sources.get(
+                "send", receive_settings.get("show_send_source", True)
+            )
         if source_type == OutputSource.RECEIVE:
-            return receive_settings.get("show_recv_source", True)
+            return display_sources.get(
+                "receive", receive_settings.get("show_recv_source", True)
+            )
         if source_type == OutputSource.SYSTEM:
-            return receive_settings.get("show_sys_source", True)
+            return display_sources.get(
+                "system", receive_settings.get("show_sys_source", True)
+            )
         if source_type == OutputSource.ERROR:
-            return receive_settings.get("show_err_source", True)
+            return display_sources.get(
+                "error", receive_settings.get("show_err_source", True)
+            )
         return True
 
     return OutputRules(

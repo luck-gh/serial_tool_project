@@ -5,14 +5,109 @@
 
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
-    QWidget, QHBoxLayout, QLineEdit, QPushButton, QCheckBox, QLabel, QComboBox
+    QWidget, QHBoxLayout, QLineEdit, QPushButton, QCheckBox, QLabel, QComboBox,
+    QDialog, QVBoxLayout, QGroupBox, QRadioButton, QScrollArea,
+    QDialogButtonBox
 )
 
 from core.text_search import MatchOptions
 
 
+class SearchScopeDialog(QDialog):
+    """发送编辑区的搜索区域和多模块范围选择。"""
+
+    def __init__(self, modules, selected_modules, search_area, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("搜索范围")
+        self.setMinimumWidth(340)
+        self._updating_modules = False
+        modules = tuple(modules)
+        selected_modules = set(selected_modules) & set(modules)
+
+        layout = QVBoxLayout(self)
+
+        area_group = QGroupBox("搜索区域")
+        area_layout = QHBoxLayout(area_group)
+        self.area_buttons = {}
+        for area in ("字符串", "备注", "一起搜索"):
+            button = QRadioButton(area)
+            button.setChecked(area == search_area)
+            self.area_buttons[area] = button
+            area_layout.addWidget(button)
+        layout.addWidget(area_group)
+
+        module_group = QGroupBox("模块范围（可多选）")
+        module_layout = QVBoxLayout(module_group)
+        self.module_scroll = QScrollArea()
+        self.module_scroll.setWidgetResizable(True)
+        self.module_scroll.setFixedHeight(190)
+        module_list = QWidget()
+        module_list_layout = QVBoxLayout(module_list)
+        module_list_layout.setContentsMargins(6, 6, 6, 6)
+
+        self.all_modules_check = QCheckBox("全部模块")
+        self.all_modules_check.setChecked(not selected_modules)
+        module_list_layout.addWidget(self.all_modules_check)
+
+        self.module_checks = {}
+        for module in modules:
+            checkbox = QCheckBox(module)
+            checkbox.setChecked(module in selected_modules)
+            checkbox.toggled.connect(self._on_module_toggled)
+            self.module_checks[module] = checkbox
+            module_list_layout.addWidget(checkbox)
+        module_list_layout.addStretch()
+
+        self.all_modules_check.toggled.connect(self._on_all_modules_toggled)
+        self.module_scroll.setWidget(module_list)
+        module_layout.addWidget(self.module_scroll)
+        layout.addWidget(module_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_all_modules_toggled(self, checked):
+        if self._updating_modules or not checked:
+            return
+        self._updating_modules = True
+        for checkbox in self.module_checks.values():
+            checkbox.setChecked(False)
+        self._updating_modules = False
+
+    def _on_module_toggled(self, checked):
+        if self._updating_modules:
+            return
+        self._updating_modules = True
+        if checked:
+            self.all_modules_check.setChecked(False)
+        elif not any(checkbox.isChecked() for checkbox in self.module_checks.values()):
+            self.all_modules_check.setChecked(True)
+        self._updating_modules = False
+
+    def selected_modules(self):
+        if self.all_modules_check.isChecked():
+            return ()
+        selected = tuple(
+            module for module, checkbox in self.module_checks.items()
+            if checkbox.isChecked()
+        )
+        return selected or ()
+
+    def search_area(self):
+        for area, button in self.area_buttons.items():
+            if button.isChecked():
+                return area
+        return "字符串"
+
+
 class FindBar(QWidget):
-    searchChanged = pyqtSignal(str, object, str)
+    SEARCH_AREA_COMMAND = "字符串"
+    SEARCH_AREA_COMMENT = "备注"
+    SEARCH_AREA_BOTH = "一起搜索"
+
+    searchChanged = pyqtSignal(str, object, object)
     navigateRequested = pyqtSignal(int)
     closed = pyqtSignal()
 
@@ -30,11 +125,16 @@ class FindBar(QWidget):
 
         self.scope_combo = QComboBox(self)
         self.scope_combo.addItem("全部")
-        if not show_scope:
-            self.scope_combo.hide()
+        self.scope_combo.hide()
+        self._selected_scopes = set()
         if show_scope:
-            self.scope_combo.setToolTip("查找范围")
-            layout.addWidget(self.scope_combo)
+            self.scope_button = QPushButton("范围")
+            self.scope_button.setFixedWidth(54)
+            self.scope_button.clicked.connect(self._show_scope_dialog)
+            layout.addWidget(self.scope_button)
+        else:
+            self.scope_button = None
+        self._search_area = self.SEARCH_AREA_COMMAND
 
         self.case_check = QCheckBox("Aa")
         self.case_check.setToolTip("区分大小写")
@@ -68,11 +168,11 @@ class FindBar(QWidget):
         self.case_check.toggled.connect(self._emit_search)
         self.regex_check.toggled.connect(self._emit_search)
         self.whole_check.toggled.connect(self._emit_search)
-        self.scope_combo.currentTextChanged.connect(self._emit_search)
         self.search_input.returnPressed.connect(lambda: self.navigateRequested.emit(1))
         self.previous_btn.clicked.connect(lambda: self.navigateRequested.emit(-1))
         self.next_btn.clicked.connect(lambda: self.navigateRequested.emit(1))
         self.close_btn.clicked.connect(self.close_bar)
+        self._update_scope_tooltip()
 
     def options(self):
         return MatchOptions(
@@ -85,20 +185,103 @@ class FindBar(QWidget):
         self.searchChanged.emit(
             self.search_input.text(),
             self.options(),
-            self.scope_combo.currentText() if self.show_scope else "全部",
+            self.selected_scopes() if self.show_scope else "全部",
         )
+
+    def search_area(self):
+        return self._search_area
+
+    def set_search_area(self, area):
+        if area not in (
+            self.SEARCH_AREA_COMMAND,
+            self.SEARCH_AREA_COMMENT,
+            self.SEARCH_AREA_BOTH,
+        ):
+            return
+        if self._search_area == area:
+            return
+        self._search_area = area
+        self._update_scope_tooltip()
+        self._emit_search()
+
+    def set_scope(self, scope):
+        if scope == "全部":
+            self.set_selected_scopes(())
+        elif self.scope_combo.findText(scope) >= 0:
+            self.set_selected_scopes((scope,))
+
+    def selected_scopes(self):
+        return tuple(
+            self.scope_combo.itemText(index)
+            for index in range(1, self.scope_combo.count())
+            if self.scope_combo.itemText(index) in self._selected_scopes
+        )
+
+    def set_selected_scopes(self, scopes):
+        valid_scopes = {
+            self.scope_combo.itemText(index)
+            for index in range(1, self.scope_combo.count())
+        }
+        selected = {scope for scope in scopes if scope in valid_scopes}
+        if selected == self._selected_scopes:
+            return
+        self._selected_scopes = selected
+        self._update_scope_tooltip()
+        self._emit_search()
+
+    def _update_scope_tooltip(self):
+        if not self.scope_button:
+            return
+        selected_scopes = self.selected_scopes()
+        if not selected_scopes:
+            module_text = "全部模块"
+        elif len(selected_scopes) <= 3:
+            module_text = "、".join(selected_scopes)
+        else:
+            module_text = f"已选 {len(selected_scopes)} 个模块"
+        self.scope_button.setToolTip(
+            f"模块范围: {module_text}\n"
+            f"搜索区域: {self._search_area}"
+        )
+
+    def _show_scope_dialog(self):
+        modules = [
+            self.scope_combo.itemText(index)
+            for index in range(1, self.scope_combo.count())
+        ]
+        dialog = SearchScopeDialog(
+            modules,
+            self.selected_scopes(),
+            self._search_area,
+            self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        selected_scopes = set(dialog.selected_modules())
+        search_area = dialog.search_area()
+        if selected_scopes == self._selected_scopes and search_area == self._search_area:
+            return
+        self._selected_scopes = selected_scopes
+        self._search_area = search_area
+        self._update_scope_tooltip()
+        self._emit_search()
 
     def set_scopes(self, scopes):
         if not self.show_scope:
             return
-        current = self.scope_combo.currentText()
+        current_scopes = set(self.selected_scopes())
         self.scope_combo.blockSignals(True)
         self.scope_combo.clear()
         self.scope_combo.addItem("全部")
         self.scope_combo.addItems([scope for scope in scopes if scope != "全部"])
-        index = self.scope_combo.findText(current)
-        self.scope_combo.setCurrentIndex(index if index >= 0 else 0)
         self.scope_combo.blockSignals(False)
+        available_scopes = {
+            self.scope_combo.itemText(index)
+            for index in range(1, self.scope_combo.count())
+        }
+        self._selected_scopes = current_scopes & available_scopes
+        self._update_scope_tooltip()
         self._emit_search()
 
     def show_and_focus(self, selected_text=""):

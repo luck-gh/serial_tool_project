@@ -10,6 +10,7 @@ Website: www.GuoHowe.com
 """
 
 import csv
+import copy
 import io
 import re
 import os
@@ -18,9 +19,9 @@ import subprocess
 from PyQt5.QtWidgets import (QApplication, QWidget, QLineEdit, QTableWidget, QCheckBox, QPushButton,
                              QHeaderView, QTableWidgetItem, QAction, QInputDialog, QMessageBox,
                              QDialog, QHBoxLayout, QVBoxLayout, QLabel, QDialogButtonBox, QTextEdit,
-                             QComboBox)
+                             QComboBox, QStyleOptionFrame, QStyle)
 from PyQt5.QtCore import Qt, QRegExp, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics, QRegExpValidator
+from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics, QRegExpValidator, QPalette
 
 from utils.ui_utils import UIUtils, Colors, resource_path
 from widgets.base_widgets import BaseWidgetMixin
@@ -243,9 +244,14 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
     def __init__(self, config_manager: ConfigManager, parent=None):
         super().__init__(parent)
         self.config_manager = config_manager
+        self.command_search_matches = []
+        self.command_search_highlight = None
         self.comment_text = ""
+        self.comment_search_matches = []
+        self.comment_search_highlight = None
         self.command_table = None
         self.row_index = -1
+        self.validation_state = None
 
         # 设置上下文菜单策略为自定义
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -254,6 +260,12 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
     def set_comment(self, comment):
         """设置注释文本"""
         self.comment_text = comment
+        self.comment_search_matches = [
+            (start, end) for start, end in self.comment_search_matches
+            if 0 <= start < end <= len(comment)
+        ]
+        if self.comment_search_highlight not in self.comment_search_matches:
+            self.comment_search_highlight = None
         # 预留右边距给注释文本, 避免与输入文本重叠
         # 根据注释长度动态调整边距
         if self.comment_text:
@@ -274,9 +286,161 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         self.setTextMargins(0, 0, margin, 0)
         self.update() # 触发重绘
 
+    def set_comment_search_highlight(self, start, end):
+        """将备注中的一个搜索匹配项标记为当前项。"""
+        match = (start, end)
+        matches = self.comment_search_matches or [match]
+        self.set_comment_search_matches(matches, match)
+
+    def set_comment_search_matches(self, matches, active_match=None):
+        """设置备注的全部搜索匹配项及当前匹配项。"""
+        self.comment_search_matches = [
+            (start, end) for start, end in matches
+            if 0 <= start < end <= len(self.comment_text)
+        ]
+        self.comment_search_highlight = (
+            active_match if active_match in self.comment_search_matches else None
+        )
+        self.update()
+
+    def clear_comment_search_highlight(self):
+        if self.comment_search_matches or self.comment_search_highlight is not None:
+            self.comment_search_matches = []
+            self.comment_search_highlight = None
+            self.update()
+
+    def set_command_search_match(self, matched, active=False):
+        """标记字符串输入行是否包含搜索结果，以及是否为当前结果。"""
+        matched = bool(matched)
+        active = bool(active and matched)
+        if (
+            bool(self.property("searchMatchStyle")) == matched
+            and bool(self.property("activeSearchMatchStyle")) == active
+        ):
+            return
+        self.setProperty("searchMatchStyle", matched)
+        self.setProperty("activeSearchMatchStyle", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def set_command_search_matches(self, matches, active_match=None):
+        """设置字符串中的全部搜索匹配项及当前匹配项。"""
+        text_length = len(self.text())
+        self.command_search_matches = [
+            (start, end) for start, end in matches
+            if 0 <= start < end <= text_length
+        ]
+        self.command_search_highlight = (
+            active_match if active_match in self.command_search_matches else None
+        )
+        self.set_command_search_match(
+            bool(self.command_search_matches),
+            self.command_search_highlight is not None,
+        )
+        self.update()
+
+    def clear_command_search_highlight(self):
+        self.command_search_matches = []
+        self.command_search_highlight = None
+        self.set_command_search_match(False)
+
+    def set_validation_state(self, state, color_policy="latest"):
+        """设置响应校验背景；sticky_failure 下通过结果不覆盖失败。"""
+        if state not in (None, "passed", "failed"):
+            state = None
+        if (
+            color_policy == "sticky_failure"
+            and self.validation_state == "failed"
+            and state == "passed"
+        ):
+            return
+        if self.validation_state == state:
+            return
+        self.validation_state = state
+        self.setProperty("validationState", state or "none")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def _paint_command_search_matches(self, painter):
+        if self.hasSelectedText():
+            return
+
+        text = self.text()
+        font_metrics = self.fontMetrics()
+        cursor_rect = self.cursorRect()
+        cursor_position = self.cursorPosition()
+        text_x = (
+            cursor_rect.x() + cursor_rect.width() // 2
+            - font_metrics.horizontalAdvance(text[:cursor_position])
+        )
+        content_option = QStyleOptionFrame()
+        self.initStyleOption(content_option)
+        content_rect = self.style().subElementRect(
+            QStyle.SE_LineEditContents,
+            content_option,
+            self,
+        )
+        text_top = content_rect.y() + (
+            content_rect.height() - font_metrics.height()
+        ) // 2
+        baseline = text_top + font_metrics.ascent()
+        margins = self.textMargins()
+        clip_rect = content_rect.adjusted(
+            margins.left(),
+            0,
+            -margins.right(),
+            0,
+        )
+
+        painter.save()
+        painter.setClipRect(clip_rect)
+        paint_matches = [
+            (start, end) for start, end in self.command_search_matches
+            if not (
+                self.hasFocus()
+                and start <= self.cursorPosition() <= end
+            )
+        ]
+        for start, end in paint_matches:
+            match_x = text_x + font_metrics.horizontalAdvance(text[:start])
+            match_width = font_metrics.horizontalAdvance(text[start:end])
+            painter.fillRect(
+                match_x,
+                text_top,
+                max(1, match_width),
+                font_metrics.height(),
+                QColor("#FFF59D"),
+            )
+
+        if self.command_search_highlight in paint_matches:
+            start, end = self.command_search_highlight
+            match_x = text_x + font_metrics.horizontalAdvance(text[:start])
+            match_width = font_metrics.horizontalAdvance(text[start:end])
+            painter.fillRect(
+                match_x,
+                text_top,
+                max(1, match_width),
+                font_metrics.height(),
+                QColor("#FFD54F"),
+            )
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(QPalette.Text))
+        for start, end in paint_matches:
+            match_x = text_x + font_metrics.horizontalAdvance(text[:start])
+            painter.drawText(match_x, baseline, text[start:end])
+        painter.restore()
+
     def paintEvent(self, event):
         """重写paintEvent, 在绘制完基础控件后, 绘制注释文本"""
-        super().paintEvent(event) # 先绘制QLineEdit本身
+        super().paintEvent(event)
+        if self.command_search_matches:
+            painter = QPainter(self)
+            self._paint_command_search_matches(painter)
+        else:
+            painter = None
 
         if not self.comment_text:
             return
@@ -291,19 +455,51 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
             visible_width = self.width() - self.textMargins().right() - 20  # 留出一些缓冲
 
             # 如果输入文本已经占用了大部分空间，不显示注释
-            if text_width > visible_width * 0.6:
+            if text_width > visible_width * 0.6 and not self.comment_search_matches:
                 return
 
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        if painter is None:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
 
-        # 设置注释文字颜色和字体（半透明灰色）
-        painter.setPen(QColor(150, 150, 150, 180))
         font = QFont("Arial", 8)
         painter.setFont(font)
 
         # 在右侧绘制注释文本
         text_rect = self.rect().adjusted(5, 0, -5, 0)
+        if self.comment_search_matches:
+            font_metrics = QFontMetrics(font)
+            comment_width = font_metrics.horizontalAdvance(self.comment_text)
+            highlight_y = (self.height() - font_metrics.height()) // 2
+            for start, end in self.comment_search_matches:
+                prefix_width = font_metrics.horizontalAdvance(self.comment_text[:start])
+                match_width = font_metrics.horizontalAdvance(self.comment_text[start:end])
+                highlight_x = text_rect.right() - comment_width + 1 + prefix_width
+                painter.fillRect(
+                    highlight_x,
+                    highlight_y,
+                    max(1, match_width),
+                    font_metrics.height(),
+                    QColor("#FFF59D"),
+                )
+
+        if self.comment_search_highlight:
+            start, end = self.comment_search_highlight
+            prefix_width = font_metrics.horizontalAdvance(self.comment_text[:start])
+            match_width = font_metrics.horizontalAdvance(self.comment_text[start:end])
+            highlight_x = text_rect.right() - comment_width + 1 + prefix_width
+            painter.fillRect(
+                highlight_x,
+                highlight_y,
+                max(1, match_width),
+                font_metrics.height(),
+                QColor("#FFD54F"),
+            )
+
+        if self.comment_search_matches:
+            painter.setPen(QColor("#000000"))
+        else:
+            painter.setPen(QColor(150, 150, 150, 180))
         painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, self.comment_text)
 
     def show_text_context_menu(self, position):
@@ -434,6 +630,12 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             QLineEdit[commandEditor="true"][rowParity="odd"] {{
                 background-color: {Colors.TABLE_ODD_ROW};
             }}
+            QLineEdit[commandEditor="true"][validationState="passed"] {{
+                background-color: #E8F5E9;
+            }}
+            QLineEdit[commandEditor="true"][validationState="failed"] {{
+                background-color: #FFEBEE;
+            }}
             QLineEdit[commandEditor="true"][hasReplacementRuleStyle="true"] {{
                 border: 2px solid {Colors.PURPLE_BUTTON};
             }}
@@ -496,6 +698,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         command_edit.setProperty("commandEditor", True)
         command_edit.setProperty("rowParity", "even" if row_index % 2 == 0 else "odd")
         command_edit.setProperty("hasReplacementRuleStyle", False)
+        command_edit.setProperty("validationState", "none")
 
         self.setCellWidget(row_index, 1, command_edit)
 
@@ -542,6 +745,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         command_edit = self.cellWidget(row, 1)
         if not command_edit:
             return
+        command_edit.set_validation_state(None)
             
         text = command_edit.text()
         
@@ -634,6 +838,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         command_edit = self.cellWidget(row, 1)
         if command_edit:
             command_edit.set_comment(comment)
+        self.commandsChanged.emit(row)
 
     def get_all_commands(self):
         """获取所有命令数据"""
@@ -654,10 +859,12 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         valid_rows = sorted({row for row in rows if 0 <= row < self.rowCount()})
         for row in valid_rows:
             if rule:
-                self.replacement_rules[row] = rule.copy()
-                self.replacement_rules[row]["options"] = rule["options"].copy()
+                self.replacement_rules[row] = copy.deepcopy(rule)
             else:
                 self.replacement_rules.pop(row, None)
+            edit = self.cellWidget(row, 1)
+            if edit:
+                edit.set_validation_state(None)
             self.update_row_replacement_indicator(row)
         self.replacementRulesChanged.emit()
 
@@ -679,6 +886,12 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             initial_rule,
             title=title,
             parent=self,
+            default_rule=getattr(
+                self.get_main_window(),
+                "DEFAULT_GLOBAL_REPLACEMENT_RULE",
+                None,
+            ),
+            default_timeout_ms=self._default_response_timeout(),
         )
         if dialog.exec_() == QDialog.Accepted:
             self.set_replacement_rules(
@@ -734,6 +947,17 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
     def update_all_replacement_indicators(self):
         for row in range(self.rowCount()):
             self.update_row_replacement_indicator(row)
+
+    def clear_validation_states(self):
+        for row in range(self.rowCount()):
+            edit = self.cellWidget(row, 1)
+            if edit:
+                edit.set_validation_state(None)
+
+    def _default_response_timeout(self):
+        main_window = self.get_main_window()
+        interval_spin = getattr(main_window, "interval_spin", None)
+        return interval_spin.value() if interval_spin is not None else 100
 
     def _set_send_button_style(self, button, replaceable):
         if button.property("replaceableStyle") == replaceable:

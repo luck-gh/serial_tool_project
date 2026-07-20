@@ -15,6 +15,7 @@ import csv
 import re
 import socket
 import tempfile
+import weakref
 from collections import OrderedDict
 
 import serial
@@ -27,13 +28,14 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QSplitter, QMenu, QAction, QSizePolicy, QStyleFactory, QInputDialog,
                              QProgressDialog, QStyle, QShortcut)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
-from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QPalette, QKeySequence
+from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QKeySequence
 
 from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource, SpecialCommandType
 from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox, ClickableComboBox
 from widgets.command_widgets import CommandRowsTextParser, CommandTableWidget
 from widgets.find_widgets import FindBar
 from dialogs.replacement_rule_dialog import ReplacementRuleDialog
+from dialogs.save_data_dialog import SaveDataSelectionDialog
 from dialogs.help_dialog import HelpDialog
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
@@ -45,6 +47,12 @@ from managers.config_manager import ConfigManager
 from dialogs.config_dialog import ConfigDialog
 from widgets.base_widgets import BaseWidgetMixin
 from core.text_search import find_matches, can_replace, replace_text, normalize_rule
+from core.text_search import (
+    compile_pattern,
+    compile_expanded_response_pattern,
+    compile_diagnostic_response_pattern,
+)
+from core.response_validation import ResponseValidationManager
 
 class SerialTool(QMainWindow, BaseWidgetMixin):
     """串口调试工具主窗口"""
@@ -52,12 +60,20 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     LEFT_PANEL_DEFAULT_EXTRA_WIDTH = 60
     SYNC_BUTTON_WIDTH = 30
     DEFAULT_GLOBAL_REPLACEMENT_RULE = {
-        "find": r"write (\d) (0x\w*) \w*",
-        "replace": "read $1 $2 1",
+        "find": r"^write\s+(\d+)\s+(?:0x)?([0-9A-Fa-f]+)\s+(?:0x)?0*([0-9A-Fa-f]+)\s*$",
+        "replace": "read $1 0x$2 1",
         "options": {
             "case_sensitive": False,
             "use_regex": True,
             "whole_word": False,
+        },
+        "response_validation": {
+            "enabled": False,
+            "expression": r"read [01] 0x\w* 1\W*\w*\s*=\s*0*$3\W",
+            "timeout_ms": 100,
+            "on_failure": "continue",
+            "color_policy": "sticky_failure",
+            "show_error": False,
         },
     }
 
@@ -74,6 +90,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.is_connected = False
         self.send_count = 0
         self.receive_count = 0
+        self.validation_pass_count = 0
+        self.validation_complete_count = 0
+        self.response_validation_manager = ResponseValidationManager()
+        self.response_validation_timer = QTimer(self)
+        self.response_validation_timer.setInterval(20)
+        self.response_validation_timer.timeout.connect(
+            self._expire_response_validations
+        )
         self.continuous_timer = QTimer()
         self.continuous_timer.timeout.connect(self.send_continuous_commands)
         self.is_continuous_sending = False
@@ -87,6 +111,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.send_find_highlight_row = None
         self.last_find_target = "receive"
         self.help_dialog = None
+        self.save_source_selection = set(OutputSource)
 
         # 使用规范化后的可执行文件名来构建配置文件名。
         config_file = get_config_file(self.exe_name)
@@ -289,7 +314,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.update_tools_state()
 
     def _set_h_splitter_sizes(self, sizes=None):
-        """设置主分割器宽度，避免左侧设置区初始状态过窄。"""
+        """设置主分割器宽度, 避免左侧设置区初始状态过窄。"""
         if sizes and len(sizes) >= 2:
             try:
                 left_width = int(sizes[0])
@@ -307,7 +332,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.h_splitter.setSizes([left_width, right_width])
 
     def _width_for_chars(self, widget, visible_chars, extra_width=36):
-        """按当前字体估算控件宽度，适配不同 DPI/缩放。"""
+        """按当前字体估算控件宽度, 适配不同 DPI/缩放。"""
         return widget.fontMetrics().horizontalAdvance("M" * visible_chars) + extra_width
 
     def _left_panel_min_width(self):
@@ -335,12 +360,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return self._compact_button_width("刷新") + 6 + self._left_port_combo_width()
 
     def _set_left_control_expanding(self, widget):
-        """左侧普通控件只随布局伸缩，不人为设置最小宽度。"""
+        """左侧普通控件只随布局伸缩, 不人为设置最小宽度。"""
         widget.setMinimumWidth(0)
         widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def _set_port_combo_compact_width(self):
-        """端口框只保留短显示宽度，完整名称通过提示查看。"""
+        """端口框只保留短显示宽度, 完整名称通过提示查看。"""
         self.port_combo.setMinimumContentsLength(self.LEFT_PORT_COMBO_VISIBLE_CHARS)
         self.port_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.port_combo.setMinimumWidth(self._left_port_combo_width())
@@ -356,13 +381,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return label
 
     def _add_port_combo_item(self, display):
-        """添加串口下拉项，并用提示显示完整端口名称。"""
+        """添加串口下拉项, 并用提示显示完整端口名称。"""
         index = self.port_combo.count()
         self.port_combo.addItem(display)
         self.port_combo.setItemData(index, display, Qt.ToolTipRole)
 
     def _sync_port_combo_display(self, text=None):
-        """同步端口提示，并让窄输入框优先显示左侧字符。"""
+        """同步端口提示, 并让窄输入框优先显示左侧字符。"""
         self.port_combo.setToolTip(text if text is not None else self.port_combo.currentText())
         line_edit = self.port_combo.lineEdit() if self.port_combo.isEditable() else None
         if line_edit:
@@ -406,7 +431,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._set_compact_button_width(self.refresh_ports_btn)
         self._bind_momentary_button_feedback(self.refresh_ports_btn, Colors.GREEN_BUTTON)
 
-        # 左侧面板最小宽度以端口行控制区为基准，普通控件随布局自动伸缩。
+        # 左侧面板最小宽度以端口行控制区为基准, 普通控件随布局自动伸缩。
         # 端口选择
         port_layout = QHBoxLayout()
         port_layout.addWidget(self._create_left_basic_label("端口:"))
@@ -585,7 +610,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.ending_combo.setCurrentText(r"\r\n")
         self._set_left_control_expanding(self.ending_combo)
         self.ending_combo.installEventFilter(self)          # 禁用滚轮
-        # 发送选项统一使用两列网格：左侧对齐，右侧随侧栏宽度伸缩。
+        # 发送选项统一使用两列网格：左侧对齐, 右侧随侧栏宽度伸缩。
         send_options_grid = QGridLayout()
         send_options_grid.setContentsMargins(0, 0, 0, 0)
         send_options_grid.setHorizontalSpacing(8)
@@ -610,7 +635,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         send_options_grid.addWidget(self.send_color_combo, 1, 1)
 
         self.replace_send_check = QCheckBox("替换发送")
-        self.replace_send_check.setToolTip("仅在发送瞬间替换字符串，快捷键 Ctrl+T")
+        self.replace_send_check.setToolTip("仅在发送瞬间替换字符串, 快捷键 Ctrl+T")
         send_options_grid.addWidget(self.replace_send_check, 2, 0)
         self.replacement_rule_btn = QPushButton("全局规则...")
         self._set_left_control_expanding(self.replacement_rule_btn)
@@ -854,11 +879,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         self.send_count_label = QLabel("发送: 0 字节")
         self.receive_count_label = QLabel("接收: 0 字节")
+        self.validation_count_label = QLabel("校验: 0/0 Err/Pass")
         self.reset_stats_btn = QPushButton("复位")
         self._bind_momentary_button_feedback(self.reset_stats_btn, Colors.BLUE_BUTTON)
 
         stats_layout.addWidget(self.send_count_label)
         stats_layout.addWidget(self.receive_count_label)
+        stats_layout.addWidget(self.validation_count_label)
         stats_layout.addStretch()
         stats_layout.addWidget(self.reset_stats_btn)
 
@@ -892,6 +919,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.command_table.commandsChanged.connect(self._on_command_table_changed)
         self.command_table.replacementRulesChanged.connect(self.update_replacement_mode_ui)
         self.receive_browser.textChanged.connect(self._refresh_receive_find_if_visible)
+        for source_checkbox in (
+            self.show_send_source_check,
+            self.show_recv_source_check,
+            self.show_sys_source_check,
+            self.show_err_source_check,
+        ):
+            source_checkbox.toggled.connect(self._refresh_output_source_display)
         self.receive_find_bar.searchChanged.connect(self._search_receive_text)
         self.receive_find_bar.navigateRequested.connect(self._navigate_receive_find)
         self.receive_find_bar.closed.connect(self._clear_receive_find)
@@ -915,7 +949,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.continuous_send_shortcut.setContext(Qt.WindowShortcut)
         self.continuous_send_shortcut.activated.connect(self.toggle_continuous_send)
 
-        # 连接工具按钮（动态连接，基于工具名映射到方法）
+        # 连接工具按钮（动态连接, 基于工具名映射到方法）
         tool_method_map = {
             "number_conversion_dialog": self.open_bit_calculator,
             "bin_hex_converter": self.open_bin_hex_converter,
@@ -1058,7 +1092,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 OutputSource.SYSTEM
             )
             if not self.is_connected or not self.serial_thread:
-                self.output_manager.append_text("提示: 主控端当前未打开串口，远程端连接后需等待本机串口恢复", OutputSource.SYSTEM)
+                self.output_manager.append_text("提示: 主控端当前未打开串口, 远程端连接后需等待本机串口恢复", OutputSource.SYSTEM)
         else:
             if not host:
                 self.output_manager.append_text("错误: 请输入远程主控端地址", OutputSource.ERROR)
@@ -1139,7 +1173,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._set_remote_status(f"远程: {status}")
 
     def on_remote_data_received(self, data):
-        """远程端收到主控端串口回包，或主控端收到远程端发送数据"""
+        """远程端收到主控端串口回包, 或主控端收到远程端发送数据"""
         if self.remote_mode == "server":
             sent_bytes = self._write_serial_data(data)
             if sent_bytes > 0:
@@ -1149,9 +1183,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 if self.show_send_check.isChecked():
                     self.output_manager.append_text(f"[远程发送 HEX]: {data.hex(' ').upper()}", OutputSource.SEND)
             else:
-                self.output_manager.append_text("错误: 主控端本地串口未打开，无法转发远程数据", OutputSource.ERROR)
+                self.output_manager.append_text("错误: 主控端本地串口未打开, 无法转发远程数据", OutputSource.ERROR)
                 if self.remote_thread and self.remote_client_connected:
-                    self.remote_thread.send_error("主控端本地串口未打开，无法发送")
+                    self.remote_thread.send_error("主控端本地串口未打开, 无法发送")
         elif self.remote_mode == "client":
             self.on_data_received(data)
 
@@ -1289,7 +1323,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
 
     def is_remote_client_active(self):
-        """远程端虚拟基本设置状态：只向主控端发送控制，不操作本机串口"""
+        """远程端虚拟基本设置状态：只向主控端发送控制, 不操作本机串口"""
         return self.remote_mode == "client" and self.remote_thread is not None and self.remote_client_connected
 
     def can_send_serial_data(self):
@@ -1402,7 +1436,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def close_serial(self):
         """关闭串口"""
-        # 如果正在连续发送，停止它
+        # 如果正在连续发送, 停止它
         if self.is_continuous_sending:
             self.stop_continuous_sending()
 
@@ -1429,6 +1463,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             text = data.decode('utf-8')
             self.receive_count += len(data)
             self.update_statistics()
+            self._process_response_validation_text(text)
             self.output_manager.append_text(text, OutputSource.RECEIVE)
         except UnicodeDecodeError:
             self.output_manager.append_text(f"[非UTF-8数据: {data.hex()}]", OutputSource.ERROR)
@@ -1455,12 +1490,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """打开配置对话框"""
         dialog = ConfigDialog(self.config_manager, self)
         if dialog.exec_():
-            # 配置已保存，可以执行一些刷新操作
+            # 配置已保存, 可以执行一些刷新操作
             self.output_manager.append_text("配置已更新", OutputSource.SYSTEM)
             self.update_tools_state()
 
     def open_help_dialog(self):
-        """打开帮助窗口，并重新载入最新的 README 内容。"""
+        """打开帮助窗口, 并重新载入最新的 README 内容。"""
         if self.help_dialog is None:
             self.help_dialog = HelpDialog(self)
         self.help_dialog.reload_content()
@@ -1491,6 +1526,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         elif source_type == OutputSource.ERROR:
             return self.show_err_source_check.isChecked()
         return True
+
+    def _refresh_output_source_display(self, _checked=None):
+        """输出来源只影响显示，不删除已记录的数据。"""
+        if not hasattr(self, "output_manager"):
+            return
+        self.output_manager.refresh_display()
+        self._refresh_receive_find_if_visible()
 
     def get_ending_chars(self):
         """获取结尾标识符"""
@@ -1545,7 +1587,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             cursor.setPosition(end, QTextCursor.KeepAnchor)
             selection.cursor = cursor
             selection.format.setBackground(
-                QColor("#FF9800" if index == self.receive_find_index else "#FFF59D")
+                QColor("#FFD54F" if index == self.receive_find_index else "#FFF59D")
             )
             selections.append(selection)
         self.receive_browser.setExtraSelections(selections)
@@ -1554,10 +1596,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         current = self.receive_find_index + 1 if total else 0
         self.receive_find_bar.set_result(current, total)
         if total:
-            start, end = self.receive_find_matches[self.receive_find_index]
+            start, _end = self.receive_find_matches[self.receive_find_index]
             cursor = self.receive_browser.textCursor()
             cursor.setPosition(start)
-            cursor.setPosition(end, QTextCursor.KeepAnchor)
             self.receive_browser.setTextCursor(cursor)
             self.receive_browser.ensureCursorVisible()
 
@@ -1578,29 +1619,50 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if self.receive_find_bar.isVisible():
             self.receive_find_bar._emit_search()
 
-    def _send_find_rows(self, scope):
-        if scope == "全部":
+    def _send_find_rows(self, scopes):
+        if not scopes or scopes == "全部":
             return range(self.command_table.rowCount())
-        return self.modules.get(scope, [])
+        if isinstance(scopes, str):
+            scopes = (scopes,)
+        rows = set()
+        for scope in scopes:
+            rows.update(self.modules.get(scope, []))
+        return sorted(rows)
 
-    def _search_send_commands(self, query, options, scope="全部"):
+    def _search_send_commands(self, query, options, scopes="全部"):
         self.send_find_matches = []
         self.send_find_index = -1
+        self._clear_send_find_highlight()
+        search_area = self.send_find_bar.search_area()
+        search_commands = search_area in (
+            FindBar.SEARCH_AREA_COMMAND,
+            FindBar.SEARCH_AREA_BOTH,
+        )
+        search_comments = search_area in (
+            FindBar.SEARCH_AREA_COMMENT,
+            FindBar.SEARCH_AREA_BOTH,
+        )
         try:
             if query:
-                for row in self._send_find_rows(scope):
+                for row in self._send_find_rows(scopes):
                     command_edit = self.command_table.cellWidget(row, 1)
                     if not command_edit:
                         continue
-                    for start, end in find_matches(command_edit.text(), query, options):
-                        self.send_find_matches.append((row, start, end))
+                    if search_commands:
+                        for start, end in find_matches(command_edit.text(), query, options):
+                            self.send_find_matches.append((row, "command", start, end))
+                    if search_comments:
+                        comment = self.command_table.comments.get(row, "")
+                        for start, end in find_matches(comment, query, options):
+                            self.send_find_matches.append((row, "comment", start, end))
         except ValueError as exc:
             self.send_find_bar.set_result(0, 0, str(exc))
             return
 
-        if self.send_find_matches:
-            self.send_find_index = 0
-        self._render_send_find()
+        # 搜索条件或命令内容变化时只刷新匹配数量, 不主动滚动表格。
+        # 跳转和高亮仅由回车、Shift+回车或查找栏上下按钮触发。
+        self._apply_all_send_find_highlights()
+        self.send_find_bar.set_result(0, len(self.send_find_matches))
 
     def _render_send_find(self):
         total = len(self.send_find_matches)
@@ -1610,9 +1672,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self._clear_send_find_highlight()
             return
 
-        row, start, end = self.send_find_matches[self.send_find_index]
-        if self.send_find_highlight_row != row:
-            self._clear_send_find_highlight()
+        row, field, start, end = self.send_find_matches[self.send_find_index]
+        self._apply_all_send_find_highlights(
+            self.send_find_matches[self.send_find_index]
+        )
         command_edit = self.command_table.cellWidget(row, 1)
         if command_edit:
             self.command_table.scrollTo(
@@ -1623,30 +1686,64 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.send_find_bar.search_input.setFocus(Qt.OtherFocusReason)
             QTimer.singleShot(
                 0,
-                lambda r=row, s=start, e=end: self._apply_send_find_highlight(r, s, e),
+                lambda r=row, f=field, s=start, e=end: self._apply_send_find_highlight(
+                    r, f, s, e
+                ),
             )
 
-    def _apply_send_find_highlight(self, row, start, end):
+    def _apply_send_find_highlight(self, row, field, start, end):
         if not self.send_find_matches or self.send_find_index < 0:
             return
-        if self.send_find_matches[self.send_find_index] != (row, start, end):
+        if self.send_find_matches[self.send_find_index] != (row, field, start, end):
             return
         command_edit = self.command_table.cellWidget(row, 1)
         if not command_edit:
             return
-        palette = command_edit.palette()
-        for color_group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
-            palette.setColor(color_group, QPalette.Highlight, QColor("#FFEB3B"))
-            palette.setColor(color_group, QPalette.HighlightedText, QColor("#000000"))
-        command_edit.setPalette(palette)
-        command_edit.setSelection(start, end - start)
+        if field == "comment":
+            command_edit.set_comment_search_highlight(start, end)
+            return
+        command_edit.set_command_search_matches(
+            command_edit.command_search_matches or [(start, end)],
+            (start, end),
+        )
+
+    def _apply_all_send_find_highlights(self, active_match=None):
+        self._clear_send_find_highlight()
+        command_matches = {}
+        comment_matches = {}
+        for row, field, start, end in self.send_find_matches:
+            if field == "command":
+                command_matches.setdefault(row, []).append((start, end))
+            else:
+                comment_matches.setdefault(row, []).append((start, end))
+
+        for row, matches in command_matches.items():
+            command_edit = self.command_table.cellWidget(row, 1)
+            if not command_edit:
+                continue
+            active_command = None
+            if active_match and active_match[0] == row and active_match[1] == "command":
+                active_command = (active_match[2], active_match[3])
+            command_edit.set_command_search_matches(matches, active_command)
+
+        for row, matches in comment_matches.items():
+            command_edit = self.command_table.cellWidget(row, 1)
+            if not command_edit:
+                continue
+            active_comment = None
+            if active_match and active_match[0] == row and active_match[1] == "comment":
+                active_comment = (active_match[2], active_match[3])
+            command_edit.set_comment_search_matches(matches, active_comment)
 
     def _navigate_send_find(self, direction):
         if not self.send_find_matches:
             return
-        self.send_find_index = (
-            self.send_find_index + direction
-        ) % len(self.send_find_matches)
+        if self.send_find_index < 0:
+            self.send_find_index = 0 if direction > 0 else len(self.send_find_matches) - 1
+        else:
+            self.send_find_index = (
+                self.send_find_index + direction
+            ) % len(self.send_find_matches)
         self._render_send_find()
 
     def _clear_send_find(self):
@@ -1655,11 +1752,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.send_find_index = -1
 
     def _clear_send_find_highlight(self):
-        row = self.send_find_highlight_row
-        if row is not None and 0 <= row < self.command_table.rowCount():
+        for row in range(self.command_table.rowCount()):
             command_edit = self.command_table.cellWidget(row, 1)
             if command_edit:
                 command_edit.deselect()
+                command_edit.clear_command_search_highlight()
+                command_edit.clear_comment_search_highlight()
         self.send_find_highlight_row = None
 
     def _on_command_table_changed(self, row_index):
@@ -1681,11 +1779,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.global_replacement_rule,
             title="发送编辑区全局替换规则",
             parent=self,
+            default_rule=self.DEFAULT_GLOBAL_REPLACEMENT_RULE,
+            default_timeout_ms=self.interval_spin.value(),
         )
         if dialog.exec_() == QDialog.Accepted:
             self.global_replacement_rule = (
                 None if dialog.clear_requested else dialog.get_rule()
             )
+            self.command_table.clear_validation_states()
             self.update_replacement_mode_ui()
 
     def _effective_replacement_rule(self, row_index):
@@ -1731,16 +1832,145 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._apply_button_color(self.continuous_btn, color)
 
     def _replace_outgoing_command(self, command, row_index):
+        return self._prepare_outgoing_command(command, row_index)[0]
+
+    def _prepare_outgoing_command(self, command, row_index):
         if not self.replace_send_check.isChecked():
-            return command
+            return command, None
+        rule = self._effective_replacement_rule(row_index)
         try:
-            replaced, _matched = replace_text(
-                command, self._effective_replacement_rule(row_index)
+            source_pattern = compile_pattern(rule["find"], rule["options"]) if rule else None
+            source_match = source_pattern.search(command) if source_pattern else None
+            replaced, matched = replace_text(command, rule)
+            if not matched or source_match is None:
+                return replaced, None
+
+            response_validation = rule.get("response_validation") or {}
+            expression = response_validation.get("expression", "")
+            if not response_validation.get("enabled", False) or not expression:
+                return replaced, None
+            expanded, response_pattern = compile_expanded_response_pattern(
+                expression,
+                source_match,
+                rule["options"],
             )
-            return replaced
+            (
+                _diagnostic_expression,
+                diagnostic_pattern,
+                diagnostic_checks,
+            ) = compile_diagnostic_response_pattern(
+                expression,
+                source_match,
+                rule["options"],
+            )
+            return replaced, {
+                "pattern": response_pattern,
+                "expanded_expression": expanded,
+                "replaced_command": replaced,
+                "diagnostic_pattern": diagnostic_pattern,
+                "diagnostic_checks": diagnostic_checks,
+                "timeout_ms": response_validation.get("timeout_ms", 100),
+                "on_failure": response_validation.get("on_failure", "continue"),
+                "color_policy": self._effective_response_color_policy(
+                    response_validation.get("color_policy", "sticky_failure")
+                ),
+                "show_error": response_validation.get("show_error", False),
+            }
         except ValueError as exc:
             self.output_manager.append_text(f"错误: 替换规则无效: {exc}", OutputSource.ERROR)
-            return command
+            return command, None
+
+    def _effective_response_color_policy(self, loop_policy):
+        """循环策略只作用于已开启循环的连续发送。"""
+        if self.is_continuous_sending and self.loop_send_check.isChecked():
+            return loop_policy
+        return "latest"
+
+    def _register_response_validation(self, validation, row_index, start_offset):
+        if not validation:
+            return
+        edit = None
+        if row_index is not None and 0 <= row_index < self.command_table.rowCount():
+            edit = self.command_table.cellWidget(row_index, 1)
+        self.response_validation_manager.add_pending(
+            row_index=-1 if row_index is None else row_index,
+            row_widget_ref=weakref.ref(edit) if edit is not None else None,
+            pattern=validation["pattern"],
+            expanded_expression=validation["expanded_expression"],
+            timeout_ms=validation["timeout_ms"],
+            on_failure=validation["on_failure"],
+            color_policy=validation["color_policy"],
+            diagnostic_pattern=validation.get("diagnostic_pattern"),
+            diagnostic_checks=validation.get("diagnostic_checks"),
+            show_error=validation.get("show_error", False),
+            replaced_command=validation.get("replaced_command", ""),
+            start_offset=start_offset,
+        )
+        if not self.response_validation_timer.isActive():
+            self.response_validation_timer.start()
+
+    def _process_response_validation_text(self, text):
+        for result in self.response_validation_manager.feed(text):
+            self._handle_response_validation_result(result)
+        if not self.response_validation_manager.pending:
+            self.response_validation_timer.stop()
+
+    def _expire_response_validations(self):
+        for result in self.response_validation_manager.expire():
+            self._handle_response_validation_result(result)
+        if not self.response_validation_manager.pending:
+            self.response_validation_timer.stop()
+
+    def _handle_response_validation_result(self, result):
+        self.validation_complete_count += 1
+        if result.passed:
+            self.validation_pass_count += 1
+
+        pending = result.pending
+        edit = pending.row_widget_ref() if pending.row_widget_ref else None
+        if edit is not None:
+            try:
+                edit.set_validation_state(
+                    "passed" if result.passed else "failed",
+                    pending.color_policy,
+                )
+            except RuntimeError:
+                edit = None
+
+        self.update_statistics()
+        if result.passed:
+            return
+
+        if pending.show_error:
+            current_row = getattr(edit, "row_index", pending.row_index)
+            row_text = (
+                f"第 {current_row + 1} 行" if current_row >= 0 else "发送命令"
+            )
+            replaced_text = (
+                f"替换后 {pending.replaced_command!r}; "
+                if pending.replaced_command
+                else ""
+            )
+            if result.reason == "value_mismatch":
+                differences = "; ".join(
+                    f"{item['reference']}: [{item['actual']}] != [{item['expected']}]"
+                    for item in result.comparisons
+                )
+                message = (
+                    f"校验失败 ({row_text}): {replaced_text}"
+                    f"值不一致, {differences}"
+                )
+            else:
+                received = result.received_text
+                if len(received) > 500:
+                    received = "..." + received[-500:]
+                message = (
+                    f"校验失败 ({row_text}): {replaced_text}超时 "
+                    f"{pending.expanded_expression!r}; 期间接收 {received!r}"
+                )
+            self.output_manager.append_text(message, OutputSource.ERROR)
+        if pending.on_failure == "stop" and self.is_continuous_sending:
+            self.stop_continuous_sending()
 
     def send_command(self, command, row_index=None):
         """发送命令"""
@@ -1751,14 +1981,22 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return False
 
         try:
-            command = self._replace_outgoing_command(command, row_index)
+            command, response_validation = self._prepare_outgoing_command(
+                command, row_index
+            )
             # 添加结尾标识符
             ending = self.get_ending_chars()
             full_command = command.encode('utf-8') + ending
+            validation_start_offset = self.response_validation_manager.end_offset
 
             # 发送数据
             sent_bytes = self._write_serial_data(full_command)
             if sent_bytes > 0:
+                self._register_response_validation(
+                    response_validation,
+                    row_index,
+                    validation_start_offset,
+                )
                 self.send_count += sent_bytes
                 self.update_statistics()
 
@@ -1792,7 +2030,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def on_send_clicked(self, row):
         """发送按钮点击事件"""
         enable, command, comment = self.command_table.get_row_data(row)
-        if command is not None:  # 允许空字符串，只要行数据存在
+        if command is not None:  # 允许空字符串, 只要行数据存在
             # 检查是否为特殊指令
             cmd_type_str, param = UIUtils.parse_special_command(command)
             if cmd_type_str:
@@ -1840,7 +2078,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.output_manager.append_text("调整波特率失败: 远程串口未连接", OutputSource.ERROR)
             return
         if self.is_connected and self.serial_thread:
-            # 动态调整波特率，无需关闭串口
+            # 动态调整波特率, 无需关闭串口
             self.output_manager.append_text(f"正在调整波特率至: {baudrate}", OutputSource.SYSTEM)
             if self.serial_thread.set_baudrate(baudrate):
                 self.output_manager.append_text(output_rules.baudrate_updated(baudrate), OutputSource.SYSTEM)
@@ -1908,15 +2146,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 设置强制不循环标志
             self._force_no_loop = True
             
-            # 如果当前没有在连续发送，则启动
+            # 如果当前没有在连续发送, 则启动
             if not self.is_continuous_sending:
                 self.start_continuous_send()
             else:
-                # 如果已经在连续发送，我们需要停止当前的发送并重新开始。
-                # 注意：stop_continuous_sending 会清除 _force_no_loop，所以我们需要在之后重新设置
+                # 如果已经在连续发送, 我们需要停止当前的发送并重新开始。
+                # 注意：stop_continuous_sending 会清除 _force_no_loop, 所以我们需要在之后重新设置
                 self.stop_continuous_sending()
                 self._force_no_loop = True
-                # 延迟一小段时间后重新启动，确保之前的定时器都已清理
+                # 延迟一小段时间后重新启动, 确保之前的定时器都已清理
                 QTimer.singleShot(self.interval_spin.value(), self.start_continuous_send)
             return True
         else:
@@ -1931,7 +2169,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def toggle_continuous_send(self):
         """切换连续发送状态"""
         if not self.is_continuous_sending:
-            # 手动启动时，清除强制不循环标志
+            # 手动启动时, 清除强制不循环标志
             if hasattr(self, '_force_no_loop'):
                 del self._force_no_loop
             self.start_continuous_send()
@@ -1999,7 +2237,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         # 是已知的特殊指令
                         commands_to_send.append((row, command, True, command_type, param))
                     else:
-                        # 未知特殊指令，按普通命令处理
+                        # 未知特殊指令, 按普通命令处理
                         unescaped_command = UIUtils.unescape_text(command)
                         commands_to_send.append((row, unescaped_command, False))
                 else:
@@ -2007,8 +2245,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     unescaped_command = UIUtils.unescape_text(command)
                     commands_to_send.append((row, unescaped_command, False))
             else:
-                # 未勾选，但如果是 mode 指令，虽然不发送，但可能需要识别（目前逻辑是勾选才发送/执行）
-                # 这里保持原样，未勾选的不加入发送队列
+                # 未勾选, 但如果是 mode 指令, 虽然不发送, 但可能需要识别（目前逻辑是勾选才发送/执行）
+                # 这里保持原样, 未勾选的不加入发送队列
                 pass
 
         # 发送命令
@@ -2017,7 +2255,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             if getattr(self, '_skip_to_loop', False):
                 self._skip_to_loop = False  # 清除标志
                 # 立即跳转到循环检查逻辑
-                index = len(commands_to_send)  # 设置为最后，触发循环检查
+                index = len(commands_to_send)  # 设置为最后, 触发循环检查
 
             if not self.is_continuous_sending or index >= len(commands_to_send):
                 # 检查是否开启了循环发送
@@ -2046,7 +2284,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     if self.special_command_manager.execute(command_type, param, self):
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     else:
-                        # 执行失败时记录错误并继续下一条，不中断连续发送
+                        # 执行失败时记录错误并继续下一条, 不中断连续发送
                         self.output_manager.append_text(
                             output_rules.special_command_failed("SendHex", param),
                             OutputSource.ERROR,
@@ -2056,7 +2294,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 elif command_type == SpecialCommandType.BAUDRATE:
                     # 执行 BaudRate 指令
                     if self.special_command_manager.execute(command_type, param, self):
-                        # 波特率切换可能导致串口重启，等待 500ms 确保稳定
+                        # 波特率切换可能导致串口重启, 等待 500ms 确保稳定
                         QTimer.singleShot(500, lambda: send_next_command(index + 1))
                     else:
                         self.output_manager.append_text(
@@ -2079,7 +2317,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 elif command_type == SpecialCommandType.SENDMODE:
                     # 执行 SendMode 指令 - 发送指定模块的内容后继续当前模块
                     def on_sendmode_complete():
-                        # SendMode 执行完毕后，继续当前模块的下一条命令
+                        # SendMode 执行完毕后, 继续当前模块的下一条命令
                         QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
 
                     self.special_command_manager.execute_sendmode_inline(param.strip(), self, on_sendmode_complete)
@@ -2087,9 +2325,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 elif command_type == SpecialCommandType.STOPCONTINUOUS:
                     # 执行 StopContinuous 指令
                     self.special_command_manager.execute(command_type, param, self)
-                    # 如果设置了 _skip_to_loop 标志（模式0），立即触发循环检查
-                    # 否则（模式1）会调用 stop_continuous_sending，is_continuous_sending 会变为 False
-                    send_next_command(len(commands_to_send))  # 跳转到结束，触发循环检查
+                    # 如果设置了 _skip_to_loop 标志（模式0）, 立即触发循环检查
+                    # 否则（模式1）会调用 stop_continuous_sending, is_continuous_sending 会变为 False
+                    send_next_command(len(commands_to_send))  # 跳转到结束, 触发循环检查
                     return
 
                 # 其他特殊指令（如mode）在发送时忽略
@@ -2134,7 +2372,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 检查是否为特殊指令
             cmd_type_str, param = UIUtils.parse_special_command(command)
             
-            # 无论是否勾选，都要处理 mode/modeend 控制逻辑，以建立正确的模块结构
+            # 无论是否勾选, 都要处理 mode/modeend 控制逻辑, 以建立正确的模块结构
             if cmd_type_str == "mode":
                 # mode指令：开始新模块
                 current_module = param.strip()
@@ -2142,22 +2380,22 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.jump_module_combo.addItem(current_module)
                 self.send_module_combo.addItem(current_module)
             elif cmd_type_str == "modeend":
-                # modeend指令：如果是勾选的，先加入当前模块（这样才能在运行时执行）
+                # modeend指令：如果是勾选的, 先加入当前模块（这样才能在运行时执行）
                 if enable:
                     self.modules[current_module].append(row)
                     
-                # 结束当前模块，切换回默认模块
-                # 注意：如果 param 是 '0' 才执行结束动作？不，定义时只要是 modeend 就结束定义范围
+                # 结束当前模块, 切换回默认模块
+                # 注意：如果 param 是 '0' 才执行结束动作？不, 定义时只要是 modeend 就结束定义范围
                 # 但运行时只有 param 不为 -1 (或特定值) 才结束？
                 # 这里我们保持定义结束的语义
                 if current_module != "默认":
                     current_module = "默认"
-                    # 如果默认模块还未初始化，创建它
+                    # 如果默认模块还未初始化, 创建它
                     if current_module not in self.modules:
                         self.modules[current_module] = []
             else:
                 # 其他指令（普通指令或非结构化特殊指令）：只有所属的模块正确
-                # 但只有勾选的才会被 execute_xxx 用到？不，refresh_modules 只是建立映射
+                # 但只有勾选的才会被 execute_xxx 用到？不, refresh_modules 只是建立映射
                 # 实际发送时会检查 enable
                 self.modules[current_module].append(row)
 
@@ -2175,13 +2413,26 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def save_receive_data(self):
         """保存接收数据"""
+        selection_dialog = SaveDataSelectionDialog(
+            self,
+            selected_sources=self.save_source_selection,
+        )
+        if selection_dialog.exec_() != QDialog.Accepted:
+            return
+        self.save_source_selection = selection_dialog.selected_sources()
+        self.save_state()
+
         filename, _ = QFileDialog.getSaveFileName(
             self, "保存接收数据", "", "Text Files (*.txt);;All Files (*)")
 
         if filename:
             try:
                 with open(filename, 'w', encoding='utf-8') as f:
-                    f.write(self.receive_browser.toPlainText())
+                    f.write(
+                        self.output_manager.text_for_sources(
+                            selection_dialog.selected_sources()
+                        )
+                    )
                 self.output_manager.append_text(f"数据已保存到: {filename}", OutputSource.SYSTEM)
             except Exception as e:
                 self.output_manager.append_text(f"错误: 保存文件失败: {str(e)}", OutputSource.ERROR)
@@ -2195,11 +2446,19 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """更新统计信息"""
         self.send_count_label.setText(f"发送: {self.send_count} 字节")
         self.receive_count_label.setText(f"接收: {self.receive_count} 字节")
+        self.validation_count_label.setText(
+            f"校验 : {self.validation_pass_count}/{self.validation_complete_count} Err/Pass"
+        )
 
     def reset_statistics(self):
         """复位统计"""
         self.send_count = 0
         self.receive_count = 0
+        self.validation_pass_count = 0
+        self.validation_complete_count = 0
+        self.response_validation_manager.clear()
+        self.response_validation_timer.stop()
+        self.command_table.clear_validation_states()
         self.update_statistics()
         self.output_manager.append_text("统计数据已复位", OutputSource.SYSTEM)
 
@@ -2236,13 +2495,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return count
 
     def _should_process_progress(self, value, maximum):
-        """控制长任务进度刷新频率，避免大文件逐行刷新阻塞界面。"""
+        """控制长任务进度刷新频率, 避免大文件逐行刷新阻塞界面。"""
         if maximum <= 100:
             return True
         return value == maximum or value % 100 == 0
 
     def _snapshot_template_state(self):
-        """保存导入前模板状态，用于取消时回滚"""
+        """保存导入前模板状态, 用于取消时回滚"""
         return {
             "commands": self.command_table.get_all_commands(),
             "replacement_rules": self.command_table.get_replacement_rules(),
@@ -2266,7 +2525,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.send_module_combo.setCurrentText(send_module)
 
     def _set_long_task_ui_busy(self, busy):
-        """长任务期间禁用主界面交互，避免可重入操作"""
+        """长任务期间禁用主界面交互, 避免可重入操作"""
         central_widget = self.centralWidget()
         if central_widget:
             central_widget.setEnabled(not busy)
@@ -2293,7 +2552,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._apply_button_color(button, target_color, extra_styles)
 
     def _safe_remove_file(self, file_path):
-        """安全删除文件，不让清理异常覆盖主异常"""
+        """安全删除文件, 不让清理异常覆盖主异常"""
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -2351,7 +2610,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
             parsed_modules, parsed_module_names, parsed_messages = self._build_template_import_data(parsed_commands)
 
-            # 解析完成后再批量刷新 UI，避免边读文件边频繁创建控件和重绘。
+            # 解析完成后再批量刷新 UI, 避免边读文件边频繁创建控件和重绘。
             self.command_table.setUpdatesEnabled(False)
             self.command_table.clear_all()
             self.modules.clear()
@@ -2386,7 +2645,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
 
     def _show_template_format_error_dialog(self, filename, error):
-        """模板格式不匹配时，让用户选择重新选文件或按纯文本导入。"""
+        """模板格式不匹配时, 让用户选择重新选文件或按纯文本导入。"""
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Warning)
         message_box.setWindowTitle("模板格式不正确")
@@ -2395,7 +2654,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             f"{error}\n\n正确格式:\n"
             "True,发送字符串,注释\n"
             "False,发送字符串,注释\n\n"
-            "是否重新选择文件，还是依然按纯文本导入？"
+            "是否重新选择文件, 还是依然按纯文本导入？"
         )
         reselect_button = message_box.addButton("重新选择文件", QMessageBox.AcceptRole)
         plain_text_button = message_box.addButton("依然导入", QMessageBox.DestructiveRole)
@@ -2410,7 +2669,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return "cancel"
 
     def _build_template_import_data(self, parsed_commands):
-        """根据命令行内容构建模块信息，供模板导入和纯文本兜底导入复用。"""
+        """根据命令行内容构建模块信息, 供模板导入和纯文本兜底导入复用。"""
         current_module = "默认"
         parsed_modules = OrderedDict([(current_module, [])])
         parsed_module_names = []
@@ -2430,7 +2689,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     current_module = "默认"
                     if current_module not in parsed_modules:
                         parsed_modules[current_module] = []
-                    parsed_messages.append("模块定义已结束，切换回默认模块")
+                    parsed_messages.append("模块定义已结束, 切换回默认模块")
 
             if cmd_type_str not in ('mode', 'modeend') and not (enable is False and command == "" and comment):
                 parsed_modules[current_module].append(row)
@@ -2467,8 +2726,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 writer.writerow(["// 选择框,串口需要发送的数据,注释"])
 
                 for index, (enable, command, comment) in enumerate(commands, start=1):
-                    # CSV writer会自动处理引号和特殊字符，无需手动转义
-                    # 只对不可见字符进行转义，保持可读性
+                    # CSV writer会自动处理引号和特殊字符, 无需手动转义
+                    # 只对不可见字符进行转义, 保持可读性
                     escaped_command = UIUtils.escape_text(command)
                     escaped_comment = UIUtils.escape_text(comment)
                     writer.writerow([str(enable), escaped_command, escaped_comment])
@@ -2530,7 +2789,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         total_rows = self.command_table.rowCount()
         if target_row < 0 or target_row >= total_rows:
-            self.output_manager.append_text(f"行号超出范围，当前共有 {total_rows} 行。", OutputSource.ERROR)
+            self.output_manager.append_text(f"行号超出范围, 当前共有 {total_rows} 行。", OutputSource.ERROR)
             return
 
         self.command_table.setCurrentCell(target_row, 0)
@@ -2557,10 +2816,16 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     "token": self.remote_token_input.text()
                 }),
                 ("receive_settings", {
-                    "show_send_source": self.show_send_source_check.isChecked(),
-                    "show_recv_source": self.show_recv_source_check.isChecked(),
-                    "show_sys_source": self.show_sys_source_check.isChecked(),
-                    "show_err_source": self.show_err_source_check.isChecked()
+                    "display_sources": {
+                        "send": self.show_send_source_check.isChecked(),
+                        "receive": self.show_recv_source_check.isChecked(),
+                        "system": self.show_sys_source_check.isChecked(),
+                        "error": self.show_err_source_check.isChecked()
+                    },
+                    "save_sources": {
+                        source.value: source in self.save_source_selection
+                        for source in OutputSource
+                    }
                 }),
                 ("send_settings", {
                     "loop_send": self.loop_send_check.isChecked(),
@@ -2634,10 +2899,24 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 3. 接收设置
             receive_settings = state.get("receive_settings")
             if receive_settings:
-                self.show_send_source_check.setChecked(receive_settings.get("show_send_source", True))
-                self.show_recv_source_check.setChecked(receive_settings.get("show_recv_source", True))
-                self.show_sys_source_check.setChecked(receive_settings.get("show_sys_source", True))
-                self.show_err_source_check.setChecked(receive_settings.get("show_err_source", True))
+                display_sources = receive_settings.get("display_sources")
+                if display_sources is None:
+                    display_sources = {
+                        "send": receive_settings.get("show_send_source", True),
+                        "receive": receive_settings.get("show_recv_source", True),
+                        "system": receive_settings.get("show_sys_source", True),
+                        "error": receive_settings.get("show_err_source", True),
+                    }
+                self.show_send_source_check.setChecked(display_sources.get("send", True))
+                self.show_recv_source_check.setChecked(display_sources.get("receive", True))
+                self.show_sys_source_check.setChecked(display_sources.get("system", True))
+                self.show_err_source_check.setChecked(display_sources.get("error", True))
+                save_sources = receive_settings.get("save_sources") or {}
+                self.save_source_selection = {
+                    source
+                    for source in OutputSource
+                    if save_sources.get(source.value, True)
+                }
             else:
                 # 兼容旧版本 (从 send_settings 中读取)
                 old_send_settings = state.get("send_settings", {})
@@ -2645,6 +2924,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.show_recv_source_check.setChecked(old_send_settings.get("show_recv_source", True))
                 self.show_sys_source_check.setChecked(old_send_settings.get("show_sys_source", True))
                 self.show_err_source_check.setChecked(old_send_settings.get("show_err_source", True))
+                self.save_source_selection = set(OutputSource)
 
             # 4. 发送设置
             send_settings = state.get("send_settings", {})
@@ -2717,7 +2997,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 jump_module = send_settings.get("jump_module")
                 send_module = send_settings.get("send_module")
 
-                # 兼容旧版本: 如果没有新的设置，尝试使用旧的 selected_module
+                # 兼容旧版本: 如果没有新的设置, 尝试使用旧的 selected_module
                 if not jump_module and not send_module:
                     old_module = send_settings.get("selected_module")
                     if old_module:

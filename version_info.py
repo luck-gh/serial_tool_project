@@ -11,5 +11,5 @@ Website: www.GuoHowe.com
 
 import datetime
 
-TOOL_VERSION = "1.2.2"
-TOOL_VERSION_DATE = datetime.datetime(2026, 7, 14, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
+TOOL_VERSION = "1.2.3"
+TOOL_VERSION_DATE = datetime.datetime(2026, 7, 20, 0, 0, 0).strftime('%Y-%m-%d %H:%M:%S')

@@ -4,6 +4,92 @@
 
 ---
 
+## 版本 1.2.4 (2026-07-24)
+
+### 摘要
+
+```txt
+新增 FirmwareDownload 连续发送特殊指令, 增加系统日志级别筛选与独立保存, 完善特殊命令日志标识和固件下载回归检查
+
+主要更新内容:
+1. 新增固件下载指令 - 支持在连续发送模块中调用 FirmwareDownload
+2. 完善固件路径选择 - 支持指令参数指定文件或沿用固件下载工具默认文件
+3. 复用下载配置 - 沿用包大小, 开始命令, CRC, ACK 和超时设置
+4. 协调串口占用 - 下载前释放本地串口, 结束后恢复此前连接
+5. 兼容两种启动方式 - 支持内置下载模块和外部固件下载工具路径
+6. 增加失败处理 - 下载失败, 取消或停止连续发送时安全终止当前流程
+7. 新增系统日志级别 - 支持常规, 告警, 信息和调试四级显示筛选
+8. 扩展保存筛选 - 保存数据时可独立选择系统日志级别并持久化配置
+9. 优化日志标识 - 为固件下载及部分特殊命令输出保留命令前缀
+10. 补充验证与文档 - 增加回归检查并说明 GUI, CLI 和远程客户端支持范围
+
+修改文件:
+- checks/firmware_download_command_check.py
+- core/cli_runner.py
+- core/firmware_download.py
+- core/output_rules.py
+- dialogs/save_data_dialog.py
+- docs/OPERATION_MANUAL_FOR_GUI.md
+- docs/VERSION_HISTORY.md
+- main.spec
+- main_window.py
+- managers/config_manager.py
+- managers/output_manager.py
+- managers/special_command_manager.py
+- utils/ui_utils.py
+- widgets/command_widgets.py
+- README.md
+- version_info.py
+
+版本更新: 1.2.3 -> 1.2.4
+```
+
+### 固件下载特殊指令
+
+- **新增** `FirmwareDownload` 特殊指令
+  - `FirmwareDownload:` 使用固件下载工具配置中的默认固件文件
+  - `FirmwareDownload:path` 使用指令参数指定的固件文件, 路径包含空格时可使用双引号
+  - 右键添加特殊命令时提供固件文件选择弹窗
+  - 仅在固件下载工具启用且内置模块或外部工具可用时显示菜单项
+- **复用** 固件下载工具配置
+  - 沿用包大小, 开始命令, CRC, ACK 和超时设置
+  - 支持调用打包后的内置下载模块或配置的外部工具
+  - 打包配置补充固件下载核心模块, 确保内置模式可用
+- **完善** 连续发送协作流程
+  - 下载开始前释放串口助手占用的本地串口
+  - 下载结束后自动恢复此前已打开的串口
+  - 下载成功后继续执行后续命令
+  - 下载失败, 用户取消或停止连续发送时终止当前流程
+  - 远程客户端模式和 CLI 模式暂不支持该指令
+
+### 系统日志筛选与保存
+
+- **新增** 系统日志级别筛选
+  - 系统来源细分为常规, 告警, 信息和调试四级
+  - 系统来源总开关与级别选择共同决定接收区显示内容
+  - 重新选择级别后可从完整日志恢复此前隐藏的信息
+  - 显示级别持久化到 `receive_settings.system_levels`
+- **扩展** 保存数据筛选
+  - 选择保存系统来源时可独立勾选系统日志级别
+  - 保存级别不受接收区当前显示级别限制
+  - 保存级别持久化到 `receive_settings.save_system_levels`
+- **优化** 日志来源标识
+  - 固件下载日志统一保留 `FirmwareDownload:` 前缀
+  - `Delay`, `BaudRate`, `SetEndlog` 和 `ComPort` 的系统输出保留命令前缀
+  - 混合日志中可更快识别特殊命令来源
+
+### 验证与兼容性
+
+- **增加** `checks/firmware_download_command_check.py` 回归检查
+  - 覆盖带空格路径解析, 默认文件回退和下载配置构建
+  - 覆盖内置模块可用性检查和系统日志级别筛选
+  - 覆盖连续发送失败后的停止行为
+- **保持** 现有配置兼容性
+  - 缺少系统日志级别字段的旧配置默认启用全部级别
+  - 工具配置格式未变, 配置版本无需升级
+
+---
+
 ## 版本 1.2.3 (2026-07-20)
 
 ### 摘要

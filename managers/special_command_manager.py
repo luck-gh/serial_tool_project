@@ -27,16 +27,19 @@ class SpecialCommandManager:
             SpecialCommandType.COMPORT: self._handle_comport,
             SpecialCommandType.SETENDLOG: self._handle_setendlog,
             SpecialCommandType.SENDMODE: self._handle_sendmode,
-            SpecialCommandType.STOPCONTINUOUS: self._handle_stop_continuous
+            SpecialCommandType.STOPCONTINUOUS: self._handle_stop_continuous,
+            SpecialCommandType.FIRMWAREDOWNLOAD: self._handle_firmware_download,
         }
 
     def add_command(self, command_type, handler):
         """添加新指令"""
         self.commands[command_type] = handler
 
-    def execute(self, command_type, param, context):
+    def execute(self, command_type, param, context, completion_callback=None):
         """执行指令"""
         if command_type in self.commands:
+            if command_type == SpecialCommandType.FIRMWAREDOWNLOAD:
+                return self.commands[command_type](param, context, completion_callback)
             return self.commands[command_type](param, context)
         return False
 
@@ -173,6 +176,12 @@ class SpecialCommandManager:
                 return True
         return False
 
+    def _handle_firmware_download(self, param, context, completion_callback=None):
+        """处理 FirmwareDownload 指令，实际流程由主窗口协调串口占用。"""
+        if not hasattr(context, "start_firmware_download_command"):
+            return False
+        return context.start_firmware_download_command(param, completion_callback)
+
     def execute_sendmode_inline(self, module_name, context, completion_callback=None):
         """内联执行 SendMode 指令 - 发送指定模块后返回继续当前模块
 
@@ -285,6 +294,28 @@ class SpecialCommandManager:
                         QTimer.singleShot(interval, lambda: send_module_command(index + 1))
 
                     self.execute_sendmode_inline(param.strip(), context, on_nested_sendmode_complete)
+                    return
+                elif command_type == SpecialCommandType.FIRMWAREDOWNLOAD:
+                    def on_firmware_download_complete(success):
+                        if not success:
+                            if hasattr(context, "stop_continuous_sending"):
+                                context.stop_continuous_sending()
+                            if completion_callback:
+                                completion_callback()
+                            return
+                        interval = context.interval_spin.value() if hasattr(context, 'interval_spin') else 100
+                        QTimer.singleShot(interval, lambda: send_module_command(index + 1))
+
+                    if not self.execute(
+                        command_type,
+                        param,
+                        context,
+                        on_firmware_download_complete,
+                    ):
+                        if hasattr(context, "stop_continuous_sending"):
+                            context.stop_continuous_sending()
+                        if completion_callback:
+                            completion_callback()
                     return
                 elif command_type == SpecialCommandType.STOPCONTINUOUS:
                     # 处理 StopContinuous 指令

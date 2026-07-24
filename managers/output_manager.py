@@ -21,16 +21,26 @@ class OutputRecord:
     text: str
     source_type: OutputSource
     color_name: str
+    system_level: str = "normal"
 
 
 class OutputManager:
     """统一输出管理器"""
     SOURCE_PROPERTY = QTextFormat.UserProperty + 1
 
-    def __init__(self, text_browser:CustomTextBrowser, timestamp_check, show_send_check, send_color_getter, source_filter_getter=None):
+    def __init__(
+        self,
+        text_browser: CustomTextBrowser,
+        timestamp_check,
+        show_send_check,
+        send_color_getter,
+        source_filter_getter=None,
+        system_level_filter_getter=None,
+    ):
         self.text_browser = text_browser
         self._receive_pending_cr = False
         self.records = []
+        self.system_level_filter_getter = system_level_filter_getter
         self.rules = OutputRules(
             timestamp_enabled=timestamp_check,
             show_send_enabled=show_send_check,
@@ -40,7 +50,7 @@ class OutputManager:
             trim_microseconds=True,
         )
 
-    def append_text(self, text, source_type, color=None):
+    def append_text(self, text, source_type, color=None, system_level="normal"):
         """记录全部分类输出，并按当前来源设置决定是否显示。"""
         if source_type == OutputSource.RECEIVE:
             text = self._coalesce_receive_crlf(text)
@@ -54,9 +64,14 @@ class OutputManager:
         if source_type != OutputSource.RECEIVE:
             rendered_text += "\n"
 
-        record = OutputRecord(rendered_text, source_type, color_name)
+        record = OutputRecord(
+            rendered_text,
+            source_type,
+            color_name,
+            self._normalize_system_level(system_level),
+        )
         self.records.append(record)
-        if self.rules.source_enabled(source_type):
+        if self._record_enabled(record):
             cursor = self.text_browser.textCursor()
             cursor.movePosition(QTextCursor.End)
             self._insert_record(cursor, record)
@@ -74,7 +89,7 @@ class OutputManager:
             cursor = self.text_browser.textCursor()
             cursor.movePosition(QTextCursor.End)
             for record in self.records:
-                if self.rules.source_enabled(record.source_type):
+                if self._record_enabled(record):
                     self._insert_record(cursor, record)
             self.text_browser.setTextCursor(cursor)
         finally:
@@ -92,20 +107,48 @@ class OutputManager:
         cursor.setCharFormat(char_format)
         cursor.insertText(record.text)
 
-    def text_for_sources(self, source_types=None):
-        """从完整日志记录中按来源导出，包含当前未显示的信息。"""
+    def _record_enabled(self, record):
+        """同时应用来源与系统日志级别筛选。"""
+        if not self.rules.source_enabled(record.source_type):
+            return False
+        if (
+            record.source_type == OutputSource.SYSTEM
+            and self.system_level_filter_getter is not None
+        ):
+            return bool(self.system_level_filter_getter(record.system_level))
+        return True
+
+    @staticmethod
+    def _normalize_system_level(level):
+        level = str(level or "normal").lower()
+        return level if level in {"normal", "warning", "info", "debug"} else "normal"
+
+    def text_for_sources(self, source_types=None, system_levels=None):
+        """从完整日志记录中按来源和系统级别导出，包含当前未显示的信息。"""
         selected_values = None
         if source_types is not None:
             selected_values = {
                 source.value if isinstance(source, OutputSource) else str(source)
                 for source in source_types
             }
+        selected_system_levels = None
+        if system_levels is not None:
+            selected_system_levels = {
+                self._normalize_system_level(level) for level in system_levels
+            }
         if not self.records:
             return self.text_browser.toPlainText()
         return "".join(
             record.text
             for record in self.records
-            if selected_values is None or record.source_type.value in selected_values
+            if (
+                (selected_values is None or record.source_type.value in selected_values)
+                and (
+                    record.source_type != OutputSource.SYSTEM
+                    or selected_system_levels is None
+                    or record.system_level in selected_system_levels
+                )
+            )
         )
 
     def reset_receive_timestamp(self):

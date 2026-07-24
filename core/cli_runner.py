@@ -239,6 +239,8 @@ def execute_payload(ser, payload, read_timeout, output, send_display=None):
 
 def execute_cli_command(command, config_manager, output, ser=None, read_timeout=0):
     cmd_type, param = UIUtils.parse_special_command(command)
+    if cmd_type == SpecialCommandType.FIRMWAREDOWNLOAD.value:
+        raise ValueError("FirmwareDownload 暂不支持 CLI 模式")
     if cmd_type in ("mode", "sendmode"):
         return execute_module(param, config_manager, output, read_timeout, ser=ser)
 
@@ -286,6 +288,8 @@ def execute_module(module_name, config_manager, output, read_timeout=0, ser=None
                 continue
             if command_type in (SpecialCommandType.MODE, SpecialCommandType.MODEEND, SpecialCommandType.STOPCONTINUOUS):
                 continue
+            if command_type == SpecialCommandType.FIRMWAREDOWNLOAD:
+                raise ValueError("FirmwareDownload 暂不支持 CLI 模式")
             if command_type == SpecialCommandType.SENDMODE:
                 state_changed = execute_module(
                     param,

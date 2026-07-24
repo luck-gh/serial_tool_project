@@ -12,6 +12,7 @@ Website: www.GuoHowe.com
 import json
 import os
 import datetime
+import importlib.util
 
 class ConfigManager:
     """管理应用程序的配置"""
@@ -217,6 +218,36 @@ class ConfigManager:
         """检查工具是否启用"""
         tool_config = self.get_tool_config(tool_name)
         return tool_config.get("enabled", False) if tool_config else False
+
+    def is_tool_available(self, tool_name):
+        """检查工具是否可从自定义路径或内置模块启动。"""
+        custom_path = self.get_tool_path(tool_name)
+        if custom_path and os.path.isfile(custom_path):
+            return True
+
+        if tool_name != "firmware_downloader":
+            return True
+
+        try:
+            module_available = importlib.util.find_spec(
+                "firmware_downloader_project.core.downloader"
+            ) is not None
+            if module_available:
+                return True
+        except (ImportError, AttributeError, ValueError):
+            pass
+
+        workspace_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        return os.path.isfile(
+            os.path.join(
+                workspace_root,
+                "firmware_downloader_project",
+                "core",
+                "downloader.py",
+            )
+        )
 
     def set_tool_config(self, tool_name, enabled, path, **kwargs):
         """设置工具的完整配置"""

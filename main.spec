@@ -77,7 +77,10 @@ add_subproject(
 )
 add_subproject(
     'firmware_downloader_project',
-    ['firmware_downloader_project.firmware_downloader_dialog'],
+    [
+        'firmware_downloader_project.firmware_downloader_dialog',
+        'firmware_downloader_project.core.downloader',
+    ],
     'BUNDLE_FIRMWARE_DOWNLOADER',
 )
 

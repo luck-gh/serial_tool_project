@@ -158,7 +158,7 @@ def sendmode_delay(delay_ms):
 
 def continuous_delay(delay_ms):
     """连续发送延迟."""
-    return f"连续发送延迟: {delay_ms}ms"
+    return f"Delay: 连续发送延迟: {delay_ms}ms"
 
 
 def invalid_delay(param):
@@ -168,17 +168,17 @@ def invalid_delay(param):
 
 def baudrate_updated(baudrate):
     """波特率已更新."""
-    return f"波特率已更新为: {baudrate}"
+    return f"BaudRate: 波特率已更新为: {baudrate}"
 
 
 def ending_set(ending):
     """结尾标识符已设置."""
-    return f"已设置结尾标识符为: {ending}"
+    return f"SetEndlog: 已设置结尾标识符为: {ending}"
 
 
 def comport_updated(port):
     """COM 口已更新."""
-    return f"COM口已更新为: {port}"
+    return f"ComPort: COM口已更新为: {port}"
 
 
 def unsupported_cli_command(command_type):

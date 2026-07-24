@@ -25,9 +25,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTextBrowser, QTableWidget, QTableWidgetItem, QHeaderView,
                              QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QFrame,
                              QMessageBox, QFileDialog, QDialog, QDialogButtonBox, QTextEdit,
-                             QSplitter, QMenu, QAction, QSizePolicy, QStyleFactory, QInputDialog,
+                             QSplitter, QSizePolicy, QStyleFactory, QInputDialog,
                              QProgressDialog, QStyle, QShortcut)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QProcess
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QKeySequence
 
 from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource, SpecialCommandType
@@ -53,6 +53,50 @@ from core.text_search import (
     compile_diagnostic_response_pattern,
 )
 from core.response_validation import ResponseValidationManager
+from core.firmware_download import (
+    FIRMWARE_TOOL_NAME,
+    FirmwareDownloadWorker,
+    build_download_config,
+    resolve_firmware_path,
+)
+
+
+class SystemLogLevelDialog(QDialog):
+    """系统日志级别多选对话框，勾选过程中保持打开。"""
+
+    LEVELS = (
+        ("normal", "常规"),
+        ("warning", "告警"),
+        ("info", "信息"),
+        ("debug", "调试"),
+    )
+
+    def __init__(self, selected_levels, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("系统日志级别")
+        self.setMinimumWidth(260)
+        layout = QVBoxLayout(self)
+
+        group = QGroupBox("显示系统日志级别（可多选）")
+        group_layout = QVBoxLayout(group)
+        self.level_checks = {}
+        for level, label in self.LEVELS:
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(level in selected_levels)
+            self.level_checks[level] = checkbox
+            group_layout.addWidget(checkbox)
+        layout.addWidget(group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_levels(self):
+        return {
+            level for level, checkbox in self.level_checks.items()
+            if checkbox.isChecked()
+        }
 
 class SerialTool(QMainWindow, BaseWidgetMixin):
     """串口调试工具主窗口"""
@@ -101,6 +145,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.continuous_timer = QTimer()
         self.continuous_timer.timeout.connect(self.send_continuous_commands)
         self.is_continuous_sending = False
+        self.firmware_download_running = False
+        self.firmware_download_cancelled = False
+        self.firmware_download_worker = None
+        self.firmware_download_process = None
+        self._firmware_download_completion = None
+        self._firmware_download_restore_serial = False
         self.current_module = "全部"
         self.modules = OrderedDict()  # 存储模块信息
         self.global_replacement_rule = normalize_rule(self.DEFAULT_GLOBAL_REPLACEMENT_RULE)
@@ -112,6 +162,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.last_find_target = "receive"
         self.help_dialog = None
         self.save_source_selection = set(OutputSource)
+        self.system_level_selection = {"normal", "warning", "info", "debug"}
+        self.save_system_level_selection = {"normal", "warning", "info", "debug"}
 
         # 使用规范化后的可执行文件名来构建配置文件名。
         config_file = get_config_file(self.exe_name)
@@ -304,7 +356,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             lambda: self.timestamp_check.isChecked(),
             lambda: self.show_send_check.isChecked(),
             self.get_send_color,
-            self.get_source_filter
+            self.get_source_filter,
+            self.get_system_level_filter,
         )
 
         # 连接信号
@@ -398,9 +451,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """根据配置更新所有工具按钮状态（通用方法）"""
         for tool_name, button in self.tool_buttons.items():
             is_enabled = self.config_manager.is_tool_enabled(tool_name)
-            button.setEnabled(is_enabled)
+            is_available = self.config_manager.is_tool_available(tool_name)
+            visible = is_enabled and is_available
+            button.setVisible(visible)
+            button.setEnabled(visible)
 
-            if is_enabled:
+            if visible:
                 self._apply_button_color(button, Colors.BLUE_BUTTON)
             else:
                 button.setStyleSheet("QPushButton { background-color: #cccccc; color: #888888; }")
@@ -585,6 +641,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         source_checkboxes_layout.addWidget(self.show_sys_source_check)
         source_checkboxes_layout.addWidget(self.show_err_source_check)
         receive_layout.addLayout(source_checkboxes_layout)
+
+        system_level_layout = QHBoxLayout()
+        system_level_layout.addWidget(QLabel("系统级别:"))
+        self.system_level_button = QPushButton()
+        self.system_level_button.clicked.connect(self._show_system_level_dialog)
+        self._update_system_level_button_text()
+        system_level_layout.addWidget(self.system_level_button)
+        system_level_layout.addStretch()
+        receive_layout.addLayout(system_level_layout)
 
         self.save_btn = QPushButton("保存数据")
         self._set_left_control_expanding(self.save_btn)
@@ -926,6 +991,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.show_err_source_check,
         ):
             source_checkbox.toggled.connect(self._refresh_output_source_display)
+        self.show_sys_source_check.toggled.connect(self.system_level_button.setEnabled)
         self.receive_find_bar.searchChanged.connect(self._search_receive_text)
         self.receive_find_bar.navigateRequested.connect(self._navigate_receive_find)
         self.receive_find_bar.closed.connect(self._clear_receive_find)
@@ -1434,10 +1500,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 打开失败时也刷新一下串口列表
             self.refresh_ports()
 
-    def close_serial(self):
+    def close_serial(self, stop_continuous=True):
         """关闭串口"""
         # 如果正在连续发送, 停止它
-        if self.is_continuous_sending:
+        if stop_continuous and self.is_continuous_sending:
             self.stop_continuous_sending()
 
         if self.serial_thread:
@@ -1454,6 +1520,287 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
         self.output_manager.append_text("串口已关闭", OutputSource.SYSTEM)
         self.send_remote_serial_config()
+
+    def _firmware_download_port_config(self):
+        """读取下载所需的本地串口配置，优先保留当前连接的真实配置。"""
+        if self.serial_thread:
+            return {
+                "port": self.serial_thread.port,
+                "baudrate": self.serial_thread.baudrate,
+                "bytesize": self.serial_thread.bytesize,
+                "parity": self.serial_thread.parity,
+                "stopbits": self.serial_thread.stopbits,
+            }
+
+        port_text = self.port_combo.currentText().strip()
+        port = port_text.split(" ")[0] if port_text else ""
+        if not port:
+            return None
+        parity_map = {
+            "None": serial.PARITY_NONE,
+            "Even": serial.PARITY_EVEN,
+            "Odd": serial.PARITY_ODD,
+            "Mark": serial.PARITY_MARK,
+        }
+        stopbits_map = {
+            "1": serial.STOPBITS_ONE,
+            "1.5": serial.STOPBITS_ONE_POINT_FIVE,
+            "2": serial.STOPBITS_TWO,
+        }
+        try:
+            return {
+                "port": port,
+                "baudrate": int(self.baud_combo.currentText()),
+                "bytesize": int(self.data_bits_combo.currentText()),
+                "parity": parity_map.get(self.parity_combo.currentText(), serial.PARITY_NONE),
+                "stopbits": stopbits_map.get(self.stop_bits_combo.currentText(), serial.STOPBITS_ONE),
+            }
+        except ValueError:
+            return None
+
+    def _firmware_download_log(self, level, message):
+        level_name = str(level or "").upper()
+        if level_name == "ERROR":
+            self.output_manager.append_text(
+                f"FirmwareDownload: {message}", OutputSource.ERROR
+            )
+            return
+        system_level = {
+            "WARNING": "warning",
+            "INFO": "info",
+            "DEBUG": "debug",
+        }.get(level_name, "normal")
+        self.output_manager.append_text(
+            f"FirmwareDownload: {message}",
+            OutputSource.SYSTEM,
+            system_level=system_level,
+        )
+
+    def _forward_external_firmware_output(self, raw_text, default_level):
+        """解析外部下载器标准输出中的级别前缀，保持与内置模式一致。"""
+        for raw_line in str(raw_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = re.match(
+                r"^(NORMAL|SUCCESS|WARNING|INFO|DEBUG|ERROR)\s*:\s*(.*)$",
+                line,
+            )
+            if match:
+                level, message = match.groups()
+                self._firmware_download_log(level, message)
+            else:
+                self._firmware_download_log(default_level, line)
+
+    def _complete_firmware_download(self, success, message):
+        """统一收尾下载任务、恢复串口并继续命令序列。"""
+        if not self.firmware_download_running:
+            return
+
+        self.firmware_download_running = False
+        self.firmware_download_worker = None
+        self.firmware_download_process = None
+        cancelled = self.firmware_download_cancelled
+        self.firmware_download_cancelled = False
+
+        if cancelled:
+            success = False
+            message = "下载被用户中断"
+
+        self._firmware_download_log("SUCCESS" if success else "ERROR", message)
+        if self._firmware_download_restore_serial:
+            self._firmware_download_log("INFO", "正在恢复串口连接")
+            self.open_serial()
+            if not self.is_connected:
+                success = False
+                self._firmware_download_log("ERROR", "恢复串口连接失败")
+            else:
+                self._firmware_download_log("INFO", "已恢复串口连接")
+        self._firmware_download_restore_serial = False
+
+        completion_callback = self._firmware_download_completion
+        self._firmware_download_completion = None
+        if completion_callback:
+            completion_callback(success)
+
+    def _start_builtin_firmware_download(self, firmware_path, port_config, download_config):
+        worker = FirmwareDownloadWorker(
+            firmware_path,
+            port_config,
+            download_config,
+            self,
+        )
+        self.firmware_download_worker = worker
+        worker.log_signal.connect(self._firmware_download_log)
+        worker.progress_signal.connect(
+            lambda current, total, text: self._firmware_download_log(
+                "INFO", f"{text} ({current}/{total})"
+            )
+        )
+        worker.finished_signal.connect(self._complete_firmware_download)
+        worker.start()
+
+    def _build_external_firmware_arguments(self, firmware_path, port_config, params):
+        """构造外部下载工具的自动下载参数，字段与内置下载器保持一致。"""
+        parity_map = {
+            serial.PARITY_NONE: "N", serial.PARITY_EVEN: "E", serial.PARITY_ODD: "O",
+            serial.PARITY_MARK: "M", serial.PARITY_SPACE: "S",
+        }
+        stopbits_map = {
+            serial.STOPBITS_ONE: "1", serial.STOPBITS_ONE_POINT_FIVE: "1.5",
+            serial.STOPBITS_TWO: "2",
+        }
+        args = [
+            "--auto-start", "--exit-on-complete", "--file", firmware_path,
+            "--port", str(port_config["port"]),
+            "--baudrate", str(port_config["baudrate"]),
+            "--bytesize", str(port_config["bytesize"]),
+            "--parity", parity_map.get(port_config["parity"], "N"),
+            "--stopbits", stopbits_map.get(port_config["stopbits"], "1"),
+            "--packet-size", str(params["packet_size"]),
+            "--start-command", str(params["start_command"]),
+        ]
+        if params.get("add_packet_crc"):
+            args.extend(["--add-packet-crc", "--packet-crc-type", str(params["packet_crc_type"])])
+        for prefix, cli_prefix, supports_crc in (
+            ("start_ack", "start-ack", False),
+            ("packet_ack", "packet-ack", True),
+            ("last_packet_ack", "last-packet-ack", True),
+        ):
+            if not params.get(f"wait_{prefix}"):
+                continue
+            args.extend([
+                f"--wait-{cli_prefix}",
+                f"--{cli_prefix}-timeout", str(params[f"{prefix}_timeout"]),
+                f"--{cli_prefix}-check-mode", str(params[f"{prefix}_check_mode"]),
+            ])
+            if params.get(f"{prefix}_check_length"):
+                args.extend([
+                    f"--{cli_prefix}-check-length",
+                    f"--{cli_prefix}-expected-length", str(params[f"{prefix}_expected_length"]),
+                ])
+            if params.get(f"{prefix}_check_data"):
+                args.extend([
+                    f"--{cli_prefix}-check-data",
+                    f"--{cli_prefix}-expected-data", str(params[f"{prefix}_expected_data"]),
+                    f"--{cli_prefix}-data-format", str(params[f"{prefix}_data_format"]),
+                ])
+            if supports_crc and params.get(f"{prefix}_check_crc"):
+                args.extend([
+                    f"--{cli_prefix}-check-crc",
+                    f"--{cli_prefix}-crc-type", str(params[f"{prefix}_crc_type"]),
+                ])
+        if params.get("send_end_string"):
+            args.extend(["--send-end-string", "--end-string", str(params["end_string"])])
+        return args
+
+    def _start_external_firmware_download(self, custom_path, firmware_path, port_config, params):
+        process = QProcess(self)
+        self.firmware_download_process = process
+        arguments = self._build_external_firmware_arguments(
+            firmware_path, port_config, params
+        )
+        if custom_path.lower().endswith(".py"):
+            program = sys.executable
+            arguments.insert(0, custom_path)
+        else:
+            program = custom_path
+        process.setProgram(program)
+        process.setArguments(arguments)
+        process.setWorkingDirectory(os.path.dirname(custom_path) or os.getcwd())
+        process.readyReadStandardOutput.connect(
+            lambda: self._forward_external_firmware_output(
+                bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace"),
+                "INFO",
+            )
+        )
+        process.readyReadStandardError.connect(
+            lambda: self._forward_external_firmware_output(
+                bytes(process.readAllStandardError()).decode("utf-8", errors="replace"),
+                "ERROR",
+            )
+        )
+        process.errorOccurred.connect(
+            lambda _error: self._complete_firmware_download(False, "外部固件下载工具无法启动")
+        )
+        process.finished.connect(
+            lambda exit_code, _status: self._complete_firmware_download(
+                exit_code == 0,
+                "下载成功" if exit_code == 0 else f"外部固件下载工具退出码: {exit_code}",
+            )
+        )
+        process.start()
+
+    def start_firmware_download_command(self, parameter, completion_callback=None):
+        """启动 FirmwareDownload 特殊指令，并在结束后调用 completion_callback(success)。"""
+        if self.firmware_download_running:
+            self._firmware_download_log("ERROR", "已有固件下载任务正在运行")
+            if completion_callback:
+                completion_callback(False)
+            return False
+        if self.is_remote_client_active():
+            self._firmware_download_log("ERROR", "远程客户端模式暂不支持本地固件下载")
+            if completion_callback:
+                completion_callback(False)
+            return False
+        if not self.config_manager.is_tool_enabled(FIRMWARE_TOOL_NAME):
+            self._firmware_download_log("ERROR", "固件下载工具未启用")
+            if completion_callback:
+                completion_callback(False)
+            return False
+        if not self.config_manager.is_tool_available(FIRMWARE_TOOL_NAME):
+            self._firmware_download_log("ERROR", "固件下载工具未找到或未打包")
+            if completion_callback:
+                completion_callback(False)
+            return False
+
+        params = self.config_manager.get_firmware_downloader_params()
+        firmware_path, error = resolve_firmware_path(parameter, params)
+        if error:
+            self._firmware_download_log("ERROR", error)
+            if completion_callback:
+                completion_callback(False)
+            return False
+        port_config = self._firmware_download_port_config()
+        if not port_config:
+            self._firmware_download_log("ERROR", "未选择有效串口")
+            if completion_callback:
+                completion_callback(False)
+            return False
+
+        self.firmware_download_running = True
+        self.firmware_download_cancelled = False
+        self._firmware_download_last_progress = -1
+        self._firmware_download_completion = completion_callback
+        self._firmware_download_restore_serial = bool(self.is_connected and self.serial_thread)
+        self._firmware_download_log("NORMAL", f"开始下载固件: {firmware_path}")
+        self._firmware_download_log("INFO", f"准备下载 {firmware_path}")
+
+        if self._firmware_download_restore_serial:
+            self._firmware_download_log("INFO", f"正在释放串口 {port_config['port']}")
+            self.close_serial(stop_continuous=False)
+
+        custom_path = self.config_manager.get_tool_path(FIRMWARE_TOOL_NAME)
+        launch = lambda: (
+            self._start_external_firmware_download(custom_path, firmware_path, port_config, params)
+            if custom_path and os.path.isfile(custom_path)
+            else self._start_builtin_firmware_download(
+                firmware_path, port_config, build_download_config(params)
+            )
+        )
+        QTimer.singleShot(150 if self._firmware_download_restore_serial else 0, launch)
+        return True
+
+    def cancel_firmware_download(self):
+        """请求取消当前固件下载，完成回调仍会负责恢复串口。"""
+        if not self.firmware_download_running:
+            return
+        self.firmware_download_cancelled = True
+        self._firmware_download_log("INFO", "正在停止下载")
+        if self.firmware_download_worker:
+            self.firmware_download_worker.cancel()
+        if self.firmware_download_process:
+            self.firmware_download_process.terminate()
 
     def on_data_received(self, data):
         """接收数据回调"""
@@ -1526,6 +1873,23 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         elif source_type == OutputSource.ERROR:
             return self.show_err_source_check.isChecked()
         return True
+
+    def get_system_level_filter(self, level):
+        """获取系统来源中指定日志级别的显示状态。"""
+        return str(level).lower() in self.system_level_selection
+
+    def _show_system_level_dialog(self):
+        """以可持续勾选的对话框编辑系统日志级别。"""
+        dialog = SystemLogLevelDialog(self.system_level_selection, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self.system_level_selection = dialog.selected_levels()
+        self._update_system_level_button_text()
+        self._refresh_output_source_display()
+
+    def _update_system_level_button_text(self):
+        selected_count = len(self.system_level_selection)
+        self.system_level_button.setText(f"选择级别 ({selected_count}/4)")
 
     def _refresh_output_source_display(self, _checked=None):
         """输出来源只影响显示，不删除已记录的数据。"""
@@ -2198,6 +2562,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def stop_continuous_sending(self):
         """停止连续发送"""
         self.is_continuous_sending = False
+        if self.firmware_download_running:
+            self.cancel_firmware_download()
         # 清除强制不循环标志
         if hasattr(self, '_force_no_loop'):
             del self._force_no_loop
@@ -2322,6 +2688,25 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
                     self.special_command_manager.execute_sendmode_inline(param.strip(), self, on_sendmode_complete)
                     return
+                elif command_type == SpecialCommandType.FIRMWAREDOWNLOAD:
+                    def on_firmware_download_complete(success):
+                        if not success:
+                            self.stop_continuous_sending()
+                            return
+                        if self.is_continuous_sending:
+                            QTimer.singleShot(
+                                self.interval_spin.value(),
+                                lambda: send_next_command(index + 1),
+                            )
+
+                    if not self.special_command_manager.execute(
+                        command_type,
+                        param,
+                        self,
+                        on_firmware_download_complete,
+                    ):
+                        self.stop_continuous_sending()
+                    return
                 elif command_type == SpecialCommandType.STOPCONTINUOUS:
                     # 执行 StopContinuous 指令
                     self.special_command_manager.execute(command_type, param, self)
@@ -2416,10 +2801,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         selection_dialog = SaveDataSelectionDialog(
             self,
             selected_sources=self.save_source_selection,
+            selected_system_levels=self.save_system_level_selection,
         )
         if selection_dialog.exec_() != QDialog.Accepted:
             return
         self.save_source_selection = selection_dialog.selected_sources()
+        self.save_system_level_selection = selection_dialog.selected_system_levels()
         self.save_state()
 
         filename, _ = QFileDialog.getSaveFileName(
@@ -2430,7 +2817,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(
                         self.output_manager.text_for_sources(
-                            selection_dialog.selected_sources()
+                            selection_dialog.selected_sources(),
+                            selection_dialog.selected_system_levels(),
                         )
                     )
                 self.output_manager.append_text(f"数据已保存到: {filename}", OutputSource.SYSTEM)
@@ -2822,9 +3210,17 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         "system": self.show_sys_source_check.isChecked(),
                         "error": self.show_err_source_check.isChecked()
                     },
+                    "system_levels": {
+                        level: level in self.system_level_selection
+                        for level in ("normal", "warning", "info", "debug")
+                    },
                     "save_sources": {
                         source.value: source in self.save_source_selection
                         for source in OutputSource
+                    },
+                    "save_system_levels": {
+                        level: level in self.save_system_level_selection
+                        for level in ("normal", "warning", "info", "debug")
                     }
                 }),
                 ("send_settings", {
@@ -2911,11 +3307,24 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.show_recv_source_check.setChecked(display_sources.get("receive", True))
                 self.show_sys_source_check.setChecked(display_sources.get("system", True))
                 self.show_err_source_check.setChecked(display_sources.get("error", True))
+                system_levels = receive_settings.get("system_levels") or {}
+                self.system_level_selection = {
+                    level
+                    for level in ("normal", "warning", "info", "debug")
+                    if system_levels.get(level, True)
+                }
+                self._update_system_level_button_text()
                 save_sources = receive_settings.get("save_sources") or {}
                 self.save_source_selection = {
                     source
                     for source in OutputSource
                     if save_sources.get(source.value, True)
+                }
+                save_system_levels = receive_settings.get("save_system_levels") or {}
+                self.save_system_level_selection = {
+                    level
+                    for level in ("normal", "warning", "info", "debug")
+                    if save_system_levels.get(level, True)
                 }
             else:
                 # 兼容旧版本 (从 send_settings 中读取)
@@ -2924,7 +3333,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.show_recv_source_check.setChecked(old_send_settings.get("show_recv_source", True))
                 self.show_sys_source_check.setChecked(old_send_settings.get("show_sys_source", True))
                 self.show_err_source_check.setChecked(old_send_settings.get("show_err_source", True))
+                self.system_level_selection = {"normal", "warning", "info", "debug"}
+                self._update_system_level_button_text()
                 self.save_source_selection = set(OutputSource)
+                self.save_system_level_selection = {
+                    "normal", "warning", "info", "debug"
+                }
 
             # 4. 发送设置
             send_settings = state.get("send_settings", {})

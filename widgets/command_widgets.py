@@ -19,7 +19,7 @@ import subprocess
 from PyQt5.QtWidgets import (QApplication, QWidget, QLineEdit, QTableWidget, QCheckBox, QPushButton,
                              QHeaderView, QTableWidgetItem, QAction, QInputDialog, QMessageBox,
                              QDialog, QHBoxLayout, QVBoxLayout, QLabel, QDialogButtonBox, QTextEdit,
-                             QComboBox, QStyleOptionFrame, QStyle)
+                             QComboBox, QStyleOptionFrame, QStyle, QFileDialog)
 from PyQt5.QtCore import Qt, QRegExp, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics, QRegExpValidator, QPalette
 
@@ -93,6 +93,44 @@ class HexInputDialog(QDialog):
 
     def get_text(self):
         return self.edit.text().strip()
+
+
+class FirmwareDownloadPathDialog(QDialog):
+    """FirmwareDownload 指令的可选固件文件输入框。"""
+
+    def __init__(self, initial_path="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("固件下载设置")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("固件文件（留空时使用固件下载工具的默认文件）:"))
+        path_layout = QHBoxLayout()
+        self.path_edit = QLineEdit(initial_path)
+        self.path_edit.setPlaceholderText("例如: D:\\firmware\\app.bin")
+        browse_button = QPushButton("浏览...")
+        browse_button.clicked.connect(self._browse_file)
+        path_layout.addWidget(self.path_edit)
+        path_layout.addWidget(browse_button)
+        layout.addLayout(path_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择固件文件",
+            self.path_edit.text().strip(),
+            "固件文件 (*.bin *.hex *.fw);;所有文件 (*)",
+        )
+        if path:
+            self.path_edit.setText(path)
+
+    def path_text(self):
+        return self.path_edit.text().strip()
 
 
 class CommandRowsTextParser:
@@ -1063,6 +1101,19 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         stopcontinuous_action.triggered.connect(lambda: self.add_special_command(row, "stopcontinuous"))
         special_command_menu.addAction(stopcontinuous_action)
 
+        main_window = self.get_main_window()
+        config_manager = getattr(main_window, "config_manager", None) if main_window else None
+        if (
+            config_manager
+            and config_manager.is_tool_enabled("firmware_downloader")
+            and config_manager.is_tool_available("firmware_downloader")
+        ):
+            firmware_action = QAction("FirmwareDownload (固件下载)", self)
+            firmware_action.triggered.connect(
+                lambda: self.add_special_command(row, "firmwaredownload")
+            )
+            special_command_menu.addAction(firmware_action)
+
         special_command_action.setMenu(special_command_menu)
         menu.addAction(special_command_action)
 
@@ -1269,6 +1320,17 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             if ok:
                 param_val = "0" if "0 -" in choice else "1"
                 command_edit.setText(f"StopContinuous:{param_val}")
+                self._uncheck_row(row)
+        elif command_type == "firmwaredownload":
+            initial_path = param.strip() if cmd_type_str == "firmwaredownload" else ""
+            if len(initial_path) >= 2 and initial_path[0] == initial_path[-1] and initial_path[0] in ("'", '"'):
+                initial_path = initial_path[1:-1]
+            dialog = FirmwareDownloadPathDialog(initial_path, self)
+            if dialog.exec_() == QDialog.Accepted:
+                firmware_path = dialog.path_text()
+                if firmware_path and any(char.isspace() for char in firmware_path):
+                    firmware_path = f'"{firmware_path}"'
+                command_edit.setText(f"FirmwareDownload:{firmware_path}")
                 self._uncheck_row(row)
 
     def _uncheck_row(self, row):

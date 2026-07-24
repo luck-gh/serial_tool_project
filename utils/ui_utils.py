@@ -62,6 +62,7 @@ class SpecialCommandType(Enum):
     SETENDLOG = "setendlog" # 结尾符设置
     SENDMODE = "sendmode"   # 发送指定模块
     STOPCONTINUOUS = "stopcontinuous"  # 停止连续发送（可选择是否停止循环）
+    FIRMWAREDOWNLOAD = "firmwaredownload"  # 固件下载
 
 # `resource_path` 已由顶部尝试导入共享实现并保留回退实现，
 # 因此删除本地重复定义以避免覆盖或重复声明。

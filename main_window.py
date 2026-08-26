@@ -103,6 +103,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     LEFT_PORT_COMBO_VISIBLE_CHARS = 7
     LEFT_PANEL_DEFAULT_EXTRA_WIDTH = 60
     SYNC_BUTTON_WIDTH = 30
+    STATE_SAVE_DEBOUNCE_MS = 800
+    STATE_SAVE_FALLBACK_MS = 30_000
     DEFAULT_GLOBAL_REPLACEMENT_RULE = {
         "find": r"^write\s+(\d+)\s+(?:0x)?([0-9A-Fa-f]+)\s+(?:0x)?0*([0-9A-Fa-f]+)\s*$",
         "replace": "read $1 0x$2 1",
@@ -164,6 +166,17 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.save_source_selection = set(OutputSource)
         self.system_level_selection = {"normal", "warning", "info", "debug"}
         self.save_system_level_selection = {"normal", "warning", "info", "debug"}
+        self._loading_state = True
+        self._state_dirty = False
+
+        self._state_save_timer = QTimer(self)
+        self._state_save_timer.setSingleShot(True)
+        self._state_save_timer.setInterval(self.STATE_SAVE_DEBOUNCE_MS)
+        self._state_save_timer.timeout.connect(self._flush_pending_state)
+
+        self._state_fallback_timer = QTimer(self)
+        self._state_fallback_timer.setInterval(self.STATE_SAVE_FALLBACK_MS)
+        self._state_fallback_timer.timeout.connect(self._flush_pending_state)
 
         # 使用规范化后的可执行文件名来构建配置文件名。
         config_file = get_config_file(self.exe_name)
@@ -185,9 +198,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         self.special_command_manager = SpecialCommandManager(self.config_manager)
 
-        self.init_ui()
-        self.refresh_ports()
-        self.load_state()
+        try:
+            self.init_ui()
+            self.refresh_ports()
+            self.load_state()
+        finally:
+            self._loading_state = False
+        self._state_fallback_timer.start()
 
     def add_initial_commands(self, addlen):
         """添加10条空的初始命令"""
@@ -982,7 +999,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.replace_send_check.toggled.connect(self.update_replacement_mode_ui)
         self.replacement_rule_btn.clicked.connect(self.edit_global_replacement_rule)
         self.command_table.commandsChanged.connect(self._on_command_table_changed)
+        self.command_table.commandsChanged.connect(self.schedule_state_save)
         self.command_table.replacementRulesChanged.connect(self.update_replacement_mode_ui)
+        self.command_table.replacementRulesChanged.connect(self.schedule_state_save)
         self.receive_browser.textChanged.connect(self._refresh_receive_find_if_visible)
         for source_checkbox in (
             self.show_send_source_check,
@@ -992,6 +1011,54 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         ):
             source_checkbox.toggled.connect(self._refresh_output_source_display)
         self.show_sys_source_check.toggled.connect(self.system_level_button.setEnabled)
+
+        for combo in (
+            self.port_combo,
+            self.baud_combo,
+            self.data_bits_combo,
+            self.parity_combo,
+            self.stop_bits_combo,
+            self.remote_mode_combo,
+            self.remote_host_input,
+            self.send_color_combo,
+            self.ending_combo,
+            self.jump_module_combo,
+            self.send_module_combo,
+        ):
+            combo.currentTextChanged.connect(self.schedule_state_save)
+
+        for checkbox in (
+            self.show_send_source_check,
+            self.show_recv_source_check,
+            self.show_sys_source_check,
+            self.show_err_source_check,
+            self.loop_send_check,
+            self.show_send_check,
+            self.replace_send_check,
+            self.timestamp_check,
+        ):
+            checkbox.toggled.connect(self.schedule_state_save)
+
+        for spinbox in (
+            self.remote_port_spin,
+            self.loop_interval_spin,
+            self.interval_spin,
+        ):
+            spinbox.valueChanged.connect(self.schedule_state_save)
+
+        self.remote_token_input.textChanged.connect(self.schedule_state_save)
+        self.h_splitter.splitterMoved.connect(self.schedule_state_save)
+
+        for group in (
+            self.basic_group,
+            self.remote_group,
+            self.receive_group,
+            self.send_group,
+            self.other_group,
+            self.template_group,
+            self.tools_group,
+        ):
+            group.toggled.connect(self.schedule_state_save)
         self.receive_find_bar.searchChanged.connect(self._search_receive_text)
         self.receive_find_bar.navigateRequested.connect(self._navigate_receive_find)
         self.receive_find_bar.closed.connect(self._clear_receive_find)
@@ -1886,6 +1953,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.system_level_selection = dialog.selected_levels()
         self._update_system_level_button_text()
         self._refresh_output_source_display()
+        self.schedule_state_save()
 
     def _update_system_level_button_text(self):
         selected_count = len(self.system_level_selection)
@@ -2152,6 +2220,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             )
             self.command_table.clear_validation_states()
             self.update_replacement_mode_ui()
+            self.schedule_state_save()
 
     def _effective_replacement_rule(self, row_index):
         if row_index is not None:
@@ -3185,6 +3254,18 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.command_table.selectRow(target_row)
         self.output_manager.append_text(f"已跳转到第 {target_row + 1} 行。", OutputSource.SYSTEM)
 
+    def schedule_state_save(self, *_args):
+        """标记状态已变化，并在用户停止操作后写入配置。"""
+        if self._loading_state:
+            return
+        self._state_dirty = True
+        self._state_save_timer.start()
+
+    def _flush_pending_state(self):
+        """保存待写状态；定时兜底可覆盖长时间连续编辑的场景。"""
+        if self._state_dirty:
+            self.save_state()
+
     def save_state(self):
         """保存当前状态到配置文件"""
         try:
@@ -3256,8 +3337,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 ("command_replacement_rules", self.command_table.get_replacement_rules())
             ])
             self.config_manager.set("state", state)
+            self._state_dirty = False
+            return True
         except Exception as e:
             print(f"保存状态失败: {e}")
+            return False
 
     def load_state(self):
         """从配置文件加载状态"""

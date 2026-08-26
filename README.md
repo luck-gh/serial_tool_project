@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>专为嵌入式开发者设计的高效串口调试工具</strong><br>
-  <sub>版本 1.2.4 | 2026-07-24</sub>
+  <sub>版本 1.2.5 | 2026-08-26</sub>
 </p>
 
 <p align="center">
@@ -32,28 +32,28 @@ GHowe 串口调试助手是一个功能丰富的串口调试工具，基于 PyQt
 
 README 只保留项目介绍、启动入口和文档导航。图形界面的具体操作、快捷键、查找、替换发送、特殊命令和命令行参数请查看下方操作手册。
 
-### 最新更新 (v1.2.4)
+### 最新更新 (v1.2.5)
 
-- ✅ 新增 `FirmwareDownload` 特殊指令，可在连续发送流程中调用固件下载工具
-- ✅ 支持指令指定固件路径或沿用工具默认文件，并复用包大小、CRC、ACK 与超时配置
-- ✅ 下载前自动释放本地串口，结束后恢复连接；失败或停止时终止本轮连续发送
-- ✅ 同时支持内置固件下载模块和外部工具路径，打包时补充下载核心模块
-- ✅ 系统日志支持常规、告警、信息和调试四级显示筛选
-- ✅ 保存数据可独立选择系统日志级别，并持久化显示与保存设置
-- ✅ 为特殊命令日志保留命令前缀，便于在混合日志中定位来源
-- ✅ 增加固件下载特殊指令回归检查，并明确 CLI 与远程客户端限制
+- ✅ 配置与命令发生变化后自动防抖保存，不再依赖关闭串口或正常退出
+- ✅ 长时间连续编辑时增加 dirty 状态定时兜底，关闭窗口时仍执行最终保存
+- ✅ JSON 配置改为临时文件写入、磁盘刷新和原子替换，降低异常中断造成文件损坏的风险
+- ✅ 串口接收改为阻塞等待首字节，减少无数据时的线程空转和 CPU 占用
+- ✅ 串口停止流程增加停止事件和 `cancel_read()`，由工作线程统一释放句柄
+- ✅ 命令启用状态、替换规则、界面布局及远程设置等持久化字段均纳入自动保存
+- ✅ 增加配置持久化与 Qt 防抖自动保存回归检查
+- ✅ 完善 Windows EXE 的 GUI、CLI 操作手册和常见问题说明
 
 👉 查看完整更新: [版本更新记录](docs/VERSION_HISTORY.md)
 
 ### 核心特性
 
 - **智能命令管理** - 支持命令模块化组织、批量操作、模板导入导出
-- **特殊指令系统** - 支持 mode、modeend、delay、SendHex、BaudRate、ComPort、SetEndlog、SendMode、StopContinuous
+- **特殊指令系统** - 支持 mode、modeend、delay、SendHex、BaudRate、ComPort、SetEndlog、SendMode、StopContinuous、FirmwareDownload
 - **灵活的发送模式** - 支持单次发送、连续发送、循环发送和替换发送
 - **独立查找能力** - 接收区和发送编辑区可分别查找，支持大小写、正则和全字符匹配
 - **替换发送能力** - 支持全局规则、命令行独立规则和正则分组替换
 - **智能输出过滤** - 按来源分类显示发送、接收、系统、错误，快速定位问题
-- **自动状态保存** - 程序关闭时自动保存配置、命令和界面布局，下次启动自动恢复
+- **自动状态保存** - 配置、命令和界面布局变更后自动防抖保存，异常退出后可恢复最近状态
 - **远程控制** - 支持局域网主控端/远程端串口控制
 - **CLI 自动化** - 支持命令行发送字符串、十六进制和部分特殊命令
 - **外部工具集成** - 支持固件下载工具、进制转换器等，完整传递串口配置和 ACK 参数
@@ -176,7 +176,7 @@ CLI 适合脚本化调用、自动化测试和 CI/本地批处理。
 当前支持的特殊命令包括：
 
 ```text
-mode, modeend, delay, SendHex, BaudRate, ComPort, SetEndlog, SendMode, StopContinuous
+mode, modeend, delay, SendHex, BaudRate, ComPort, SetEndlog, SendMode, StopContinuous, FirmwareDownload
 ```
 
 特殊命令在 GUI 和 CLI 中的支持范围不同。格式、示例和差异说明请查看：
@@ -206,7 +206,7 @@ pyinstaller main.spec
 
 GUI、通用 EXE 和 CLI EXE 会打包 GUI/CLI 两份操作手册，便于随发布包分发。
 
-GitHub Release 上传时会在扩展名前追加版本号，例如 `GHowe_串口调试助手_GUI_v1.2.3.exe`；本地执行 `pyinstaller main.spec` 时仍使用上表中的文件名。
+GitHub Release 上传时会在扩展名前追加版本号，例如 `GHowe_串口调试助手_GUI_v1.2.5.exe`；本地执行 `pyinstaller main.spec` 时仍使用上表中的文件名。
 
 ---
 

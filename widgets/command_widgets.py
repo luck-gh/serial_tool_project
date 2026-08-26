@@ -860,6 +860,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                         cb.blockSignals(True)
                         cb.setChecked(is_checked)
                         cb.blockSignals(False)
+        self.commandsChanged.emit(row)
 
     def get_row_data(self, row):
         """获取行数据"""

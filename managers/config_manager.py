@@ -13,6 +13,7 @@ import json
 import os
 import datetime
 import importlib.util
+import tempfile
 
 class ConfigManager:
     """管理应用程序的配置"""
@@ -183,7 +184,7 @@ class ConfigManager:
         return default_config
 
     def save_config(self, config_data=None):
-        """保存当前配置到文件"""
+        """原子保存当前配置，避免进程中断时留下不完整的 JSON。"""
         if config_data is None:
             config_data = self.config
 
@@ -193,8 +194,33 @@ class ConfigManager:
         config_data["config_version"] = self.tool_version  # 配置版本与工具版本保持一致
         config_data["config_last_updated"] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            json.dump(config_data, f, indent=4, ensure_ascii=False)
+        config_path = os.path.abspath(self.config_file)
+        config_directory = os.path.dirname(config_path)
+        temp_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                newline='\n',
+                prefix=f'.{os.path.basename(config_path)}.',
+                suffix='.tmp',
+                dir=config_directory,
+                delete=False,
+            ) as temp_file:
+                temp_path = temp_file.name
+                json.dump(config_data, temp_file, indent=4, ensure_ascii=False)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+
+            os.replace(temp_path, config_path)
+            temp_path = None
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def get(self, key, default=None):
         """获取配置项"""

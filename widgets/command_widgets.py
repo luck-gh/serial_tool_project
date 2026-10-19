@@ -2,25 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-命令控件模块, 负责命令输入框, 注释显示和命令表格的编辑交互。
+命令控件模块, 负责命令输入框, 注释显示和命令表格的编辑交互.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
 Website: www.GuoHowe.com
 """
 
-import csv
 import copy
-import io
 import re
 import os
 import sys
 import subprocess
+from core.command_parser import command_parts, unescape_text
+from core.command_templates import CommandRowsTextParser
+
 from PyQt5.QtWidgets import (QApplication, QWidget, QLineEdit, QTableWidget, QCheckBox, QPushButton,
                              QHeaderView, QTableWidgetItem, QAction, QInputDialog, QMessageBox,
                              QDialog, QHBoxLayout, QVBoxLayout, QLabel, QDialogButtonBox, QTextEdit,
                              QComboBox, QStyleOptionFrame, QStyle, QFileDialog)
-from PyQt5.QtCore import Qt, QRegExp, pyqtSignal
+from PyQt5.QtCore import Qt, QRegExp, pyqtSignal, QSignalBlocker
 from PyQt5.QtGui import QPainter, QColor, QFont, QFontMetrics, QRegExpValidator, QPalette
 
 from utils.ui_utils import UIUtils, Colors, resource_path
@@ -31,8 +32,14 @@ from managers.config_manager import ConfigManager
 from core.text_search import normalize_rule
 
 class HexInputDialog(QDialog):
-    """SendHex 专用输入对话框，支持实时格式化"""
+    """SendHex 专用输入对话框,支持实时格式化"""
     def __init__(self, initial_text="", parent=None):
+        """创建十六进制命令输入框.
+
+        Args:
+            initial_text (str): 初始 HEX 文本,默认空;允许十六进制字符和空白.
+            parent (QWidget | None): Qt 父窗口,默认 None.
+        """
         super().__init__(parent)
         self.setWindowTitle("SendHex 设置")
         self.setMinimumWidth(300)
@@ -57,7 +64,7 @@ class HexInputDialog(QDialog):
         layout.addWidget(self.button_box)
 
     def _on_text_changed(self, text):
-        """实时格式化十六进制输入"""
+        """将输入规范为大写,每字节空格分隔的 HEX,按光标前有效字符数恢复光标."""
         # 提取所有有效的十六进制字符
         clean_hex = "".join(c for c in text if c.lower() in "0123456789abcdef")
         
@@ -92,13 +99,20 @@ class HexInputDialog(QDialog):
             self.edit.blockSignals(False)
 
     def get_text(self):
+        """返回输入框去除首尾空白后的十六进制文本."""
         return self.edit.text().strip()
 
 
 class FirmwareDownloadPathDialog(QDialog):
-    """FirmwareDownload 指令的可选固件文件输入框。"""
+    """FirmwareDownload 指令的可选固件文件输入框."""
 
     def __init__(self, initial_path="", parent=None):
+        """创建固件路径输入框,不读取或下载所选文件.
+
+        Args:
+            initial_path (str): 预填路径,默认空;为空表示使用工具默认文件.
+            parent (QWidget | None): Qt 父窗口,默认 None.
+        """
         super().__init__(parent)
         self.setWindowTitle("固件下载设置")
         self.setMinimumWidth(520)
@@ -120,6 +134,7 @@ class FirmwareDownloadPathDialog(QDialog):
         layout.addWidget(buttons)
 
     def _browse_file(self):
+        """选择本机文件并更新路径文本;后续下载入口负责 BIN 类型与大小校验."""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择固件文件",
@@ -130,82 +145,24 @@ class FirmwareDownloadPathDialog(QDialog):
             self.path_edit.setText(path)
 
     def path_text(self):
+        """返回去除首尾空白后的路径;空字符串保留使用默认文件的语义."""
         return self.path_edit.text().strip()
 
 
-class CommandRowsTextParser:
-    """把模板文本或纯文本解析成命令表格行。"""
-    FORMAT_TEMPLATE = "模板格式 (CSV)"
-    FORMAT_PLAIN_TEXT = "纯文本"
-
-    TEMPLATE_HELP = (
-        "模板格式每行应为: True,串口需要发送的数据,注释\n"
-        "或: False,串口需要发送的数据,注释\n"
-        "注释列可以为空；以 // 开头的行会被当作说明跳过。"
-    )
-
-    @classmethod
-    def parse_rows(cls, text, input_format):
-        if input_format not in (cls.FORMAT_TEMPLATE, cls.FORMAT_PLAIN_TEXT):
-            raise ValueError("请先选择输入格式。")
-
-        if input_format == cls.FORMAT_PLAIN_TEXT:
-            return cls.parse_plain_text_rows(text)
-
-        return cls.parse_template_rows(text)
-
-    @classmethod
-    def parse_plain_text_rows(cls, text):
-        rows = []
-        for line in text.splitlines():
-            command = line.strip()
-            if command:
-                rows.append((False, command, ""))
-        if not rows:
-            raise ValueError("请输入至少一行非空文本。")
-        return rows
-
-    @classmethod
-    def parse_template_rows(cls, text):
-        rows = []
-        reader = csv.reader(io.StringIO(text))
-        for line_number, row in enumerate(reader, start=1):
-            if not row or not any(cell.strip() for cell in row):
-                continue
-
-            first_cell = row[0].strip()
-            if first_cell.startswith("//") or first_cell.startswith("#"):
-                continue
-
-            enable_str = first_cell.lower()
-            if enable_str not in ("true", "false"):
-                raise ValueError(
-                    f"第 {line_number} 行格式不正确，第一列必须是 True 或 False。"
-                )
-            if len(row) < 2:
-                raise ValueError(f"第 {line_number} 行格式不正确，缺少发送字符串列。")
-
-            enable = enable_str == "true"
-            command = UIUtils.unescape_csv_text(row[1].strip())
-            if len(row) > 2:
-                comment = ",".join(cell.strip() for cell in row[2:])
-                comment = UIUtils.unescape_csv_text(comment)
-            else:
-                comment = ""
-            rows.append((enable, command, comment))
-
-        if not rows:
-            raise ValueError("没有解析到可添加的命令行。")
-        return rows
 
 
 class TextRowsInputDialog(QDialog):
-    """根据多行文本生成命令行的输入对话框。"""
+    """根据多行文本生成命令行的输入对话框."""
     FORMAT_TEMPLATE = CommandRowsTextParser.FORMAT_TEMPLATE
     FORMAT_PLAIN_TEXT = CommandRowsTextParser.FORMAT_PLAIN_TEXT
     TEMPLATE_HELP = CommandRowsTextParser.TEMPLATE_HELP
 
     def __init__(self, parent=None):
+        """创建多行文本导入对话框.
+
+        Args:
+            parent (QWidget | None): Qt 父窗口,默认 None.
+        """
         super().__init__(parent)
         self.setWindowTitle("根据文本添加多行")
         self.setMinimumSize(520, 360)
@@ -239,16 +196,20 @@ class TextRowsInputDialog(QDialog):
 
     @staticmethod
     def parse_rows(text, input_format):
+        """委托共享解析器按所选格式解析文本."""
         return CommandRowsTextParser.parse_rows(text, input_format)
 
     @staticmethod
     def parse_template_rows(text):
+        """委托共享解析器解析 CSV 模板文本."""
         return CommandRowsTextParser.parse_template_rows(text)
 
     def get_rows(self):
+        """返回最近一次通过验证的导入行列表."""
         return self.parsed_rows
 
     def _update_help_text(self, input_format):
+        """随输入格式选择更新帮助文字和示例占位符."""
         if input_format == self.FORMAT_TEMPLATE:
             self.help_label.setText(self.TEMPLATE_HELP)
             self.text_edit.setPlaceholderText(
@@ -265,6 +226,7 @@ class TextRowsInputDialog(QDialog):
             self.text_edit.setPlaceholderText("请选择上方的输入格式后，再输入多行文本。")
 
     def _validate_and_accept(self):
+        """解析输入,成功才接受对话框;格式错误保留窗口并显示原因."""
         try:
             self.parsed_rows = self.parse_rows(
                 self.text_edit.toPlainText(),
@@ -278,8 +240,18 @@ class TextRowsInputDialog(QDialog):
 
 
 class CommandLineEdit(QLineEdit, BaseWidgetMixin):
-    """自定义命令行编辑框, 支持注释显示和文本编辑右键菜单"""
+    """支持命令编辑,右侧注释,查找高亮和响应校验状态的输入框.
+
+    持有命令表和行号关联,用于右键菜单与替换规则编辑;注释由 paintEvent
+    绘制,不拼接进实际发送文本.控件自身不打开串口.
+    """
     def __init__(self, config_manager: ConfigManager, parent=None):
+        """初始化命令编辑及高亮状态.
+
+        Args:
+            config_manager (ConfigManager): 所属窗口的配置,供工具和特殊命令菜单使用.
+            parent (QWidget | None): Qt 父控件,默认 None;命令表创建时传入 viewport.
+        """
         super().__init__(parent)
         self.config_manager = config_manager
         self.command_search_matches = []
@@ -296,7 +268,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         self.customContextMenuRequested.connect(self.show_text_context_menu)
 
     def set_comment(self, comment):
-        """设置注释文本"""
+        """保存完整注释,绘制时仅使用命令剩余空间."""
         self.comment_text = comment
         self.comment_search_matches = [
             (start, end) for start, end in self.comment_search_matches
@@ -304,34 +276,16 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         ]
         if self.comment_search_highlight not in self.comment_search_matches:
             self.comment_search_highlight = None
-        # 预留右边距给注释文本, 避免与输入文本重叠
-        # 根据注释长度动态调整边距
-        if self.comment_text:
-            # 使用与paintEvent中相同的字体来计算所需空间
-            comment_font = QFont("Arial", 8)
-            font_metrics = QFontMetrics(comment_font)
-            comment_width = font_metrics.horizontalAdvance(self.comment_text)
-
-            # 如果注释太长(超过控件宽度的40%),不设置边距,让paintEvent根据文本长度自动隐藏
-            max_comment_width = self.width() * 0.4
-            if comment_width > max_comment_width:
-                margin = 0
-            else:
-                # 额外增加一点边距, 比如 10px
-                margin = comment_width + 10
-        else:
-            margin = 0
-        self.setTextMargins(0, 0, margin, 0)
-        self.update() # 触发重绘
+        self.update()  # 触发重绘
 
     def set_comment_search_highlight(self, start, end):
-        """将备注中的一个搜索匹配项标记为当前项。"""
+        """将备注中的一个搜索匹配项标记为当前项."""
         match = (start, end)
         matches = self.comment_search_matches or [match]
         self.set_comment_search_matches(matches, match)
 
     def set_comment_search_matches(self, matches, active_match=None):
-        """设置备注的全部搜索匹配项及当前匹配项。"""
+        """设置备注的全部搜索匹配项及当前匹配项."""
         self.comment_search_matches = [
             (start, end) for start, end in matches
             if 0 <= start < end <= len(self.comment_text)
@@ -342,13 +296,14 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         self.update()
 
     def clear_comment_search_highlight(self):
+        """清除注释当前匹配高亮并重绘控件."""
         if self.comment_search_matches or self.comment_search_highlight is not None:
             self.comment_search_matches = []
             self.comment_search_highlight = None
             self.update()
 
     def set_command_search_match(self, matched, active=False):
-        """标记字符串输入行是否包含搜索结果，以及是否为当前结果。"""
+        """标记字符串输入行是否包含搜索结果,以及是否为当前结果."""
         matched = bool(matched)
         active = bool(active and matched)
         if (
@@ -363,7 +318,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         self.update()
 
     def set_command_search_matches(self, matches, active_match=None):
-        """设置字符串中的全部搜索匹配项及当前匹配项。"""
+        """设置字符串中的全部搜索匹配项及当前匹配项."""
         text_length = len(self.text())
         self.command_search_matches = [
             (start, end) for start, end in matches
@@ -379,12 +334,13 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         self.update()
 
     def clear_command_search_highlight(self):
+        """清除命令当前匹配高亮并重绘控件."""
         self.command_search_matches = []
         self.command_search_highlight = None
         self.set_command_search_match(False)
 
     def set_validation_state(self, state, color_policy="latest"):
-        """设置响应校验背景；sticky_failure 下通过结果不覆盖失败。"""
+        """设置响应校验背景;sticky_failure 下通过结果不覆盖失败."""
         if state not in (None, "passed", "failed"):
             state = None
         if (
@@ -402,6 +358,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         self.update()
 
     def _paint_command_search_matches(self, painter):
+        """按文本位置绘制命令匹配与当前匹配,遵循当前字体及输入框滚动位置."""
         if self.hasSelectedText():
             return
 
@@ -411,7 +368,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         cursor_position = self.cursorPosition()
         text_x = (
             cursor_rect.x() + cursor_rect.width() // 2
-            - font_metrics.horizontalAdvance(text[:cursor_position])
+            - font_metrics.horizontalAdvance(text, cursor_position)
         )
         content_option = QStyleOptionFrame()
         self.initStyleOption(content_option)
@@ -472,7 +429,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         painter.restore()
 
     def paintEvent(self, event):
-        """重写paintEvent, 在绘制完基础控件后, 绘制注释文本"""
+        """绘制输入内容和查找匹配;当命令仍有足够可视空间时,在右侧绘制注释."""
         super().paintEvent(event)
         if self.command_search_matches:
             painter = QPainter(self)
@@ -483,18 +440,17 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         if not self.comment_text:
             return
 
-        # 只在输入框为空或输入文本较短时才显示注释
-        current_text = self.text()
-        if current_text:
-            # 计算当前文本的显示宽度
-            font_metrics = self.fontMetrics()
-            text_width = font_metrics.horizontalAdvance(current_text)
-            # 获取可视区域宽度（考虑边距和滚动）
-            visible_width = self.width() - self.textMargins().right() - 20  # 留出一些缓冲
-
-            # 如果输入文本已经占用了大部分空间，不显示注释
-            if text_width > visible_width * 0.6 and not self.comment_search_matches:
-                return
+        option = QStyleOptionFrame()
+        self.initStyleOption(option)
+        text_rect = self.style().subElementRect(QStyle.SE_LineEditContents, option, self).adjusted(5, 0, -5, 0)
+        metrics = self.fontMetrics()
+        # cursorRect 包含 QLineEdit 的实际横向滚动,不另算 DPI 或改变命令边距.
+        text_x = self.cursorRect().center().x() - metrics.horizontalAdvance(self.text(), self.cursorPosition())
+        command_right = text_x + metrics.horizontalAdvance(self.text()) if self.text() else text_rect.left()
+        text_rect.setLeft(max(text_rect.left(), command_right + 10,
+                              text_rect.right() - int(text_rect.width() * 0.4) + 1))
+        if text_rect.width() <= 0:
+            return
 
         if painter is None:
             painter = QPainter(self)
@@ -503,13 +459,17 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
         font = QFont("Arial", 8)
         painter.setFont(font)
 
-        # 在右侧绘制注释文本
-        text_rect = self.rect().adjusted(5, 0, -5, 0)
+        font_metrics = QFontMetrics(font)
+        display_comment = font_metrics.elidedText(self.comment_text, Qt.ElideRight, text_rect.width())
+        visible_length = len(display_comment) if display_comment == self.comment_text else len(display_comment.removesuffix("…"))
+        painter.setClipRect(text_rect)
         if self.comment_search_matches:
-            font_metrics = QFontMetrics(font)
-            comment_width = font_metrics.horizontalAdvance(self.comment_text)
+            comment_width = font_metrics.horizontalAdvance(display_comment)
             highlight_y = (self.height() - font_metrics.height()) // 2
             for start, end in self.comment_search_matches:
+                if start >= visible_length:
+                    continue
+                end = min(end, visible_length)
                 prefix_width = font_metrics.horizontalAdvance(self.comment_text[:start])
                 match_width = font_metrics.horizontalAdvance(self.comment_text[start:end])
                 highlight_x = text_rect.right() - comment_width + 1 + prefix_width
@@ -521,8 +481,9 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
                     QColor("#FFF59D"),
                 )
 
-        if self.comment_search_highlight:
+        if self.comment_search_highlight and self.comment_search_highlight[0] < visible_length:
             start, end = self.comment_search_highlight
+            end = min(end, visible_length)
             prefix_width = font_metrics.horizontalAdvance(self.comment_text[:start])
             match_width = font_metrics.horizontalAdvance(self.comment_text[start:end])
             highlight_x = text_rect.right() - comment_width + 1 + prefix_width
@@ -538,7 +499,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
             painter.setPen(QColor("#000000"))
         else:
             painter.setPen(QColor(150, 150, 150, 180))
-        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, self.comment_text)
+        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, display_comment)
 
     def show_text_context_menu(self, position):
         """显示文本编辑右键菜单"""
@@ -607,7 +568,7 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
             )
             menu.addAction(clear_replacement_action)
 
-        # --- 外部工具：数字转换器 ---
+        # --- 外部工具:数字转换器 ---
         selected_text = self.selectedText().strip() if self.hasSelectedText() else None
         self.add_number_converter_actions(menu, self.config_manager, selected_text)
 
@@ -621,11 +582,21 @@ class CommandLineEdit(QLineEdit, BaseWidgetMixin):
 
 
 class CommandTableWidget(QTableWidget, BaseWidgetMixin):
-    """命令表格控件"""
+    """命令表格,统一创建加载,追加及插入行,并维护行号与命令信号.
+
+    新行沿用相邻命令行的字体和行高;首行根据完成样式初始化后的控件
+    尺寸计算.Qt 的控件尺寸使用逻辑像素,不额外乘屏幕设备像素比.
+    """
     commandsChanged = pyqtSignal(int)
     replacementRulesChanged = pyqtSignal()
 
     def __init__(self, config_manager: ConfigManager, parent=None):
+        """初始化命令表格,不加载或发送设备命令.
+
+        Args:
+            config_manager (ConfigManager): 当前窗口的配置管理器,供命令和工具菜单使用.
+            parent (QWidget | None): Qt 父控件,提供窗口样式及生命周期,默认 None.
+        """
         super().__init__(parent)
         self.config_manager = config_manager
         # 设置右键菜单
@@ -706,17 +677,39 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         self.replacement_rules = {}
 
     def add_command_row(self, enable=False, command="", comment="", row_index=None):
-        """添加命令行"""
+        """创建加载,追加和插入共用的命令行并连接编辑/发送信号.
+
+        Args:
+            enable (bool): 是否勾选连续发送,默认 False.
+            command (str): 初始命令文本,默认空.
+            comment (str): 右侧显示的注释,默认空,不作为串口发送内容.
+            row_index (int | None): 插入位置;默认 None 表示追加到末尾.
+
+        Returns:
+            QPushButton: 新行的发送按钮.
+
+        插入前读取邻行字体和行高,首行在样式初始化后按逻辑像素计算尺寸;
+        不再乘设备像素比.中间插入时调用方仍需迁移原行的注释/规则索引并刷新
+        后续行号和信号绑定.
+        """
         if row_index is None:
             row_index = self.rowCount()
-        self.insertRow(row_index)
+        # 插入前保存邻行样式,避免新控件取到不同的应用默认字体或屏幕缩放.
+        reference_row = min(row_index, self.rowCount() - 1)
+        if row_index > 0 and self.cellWidget(row_index, 1) is None:
+            reference_row = row_index - 1
+        reference_edit = self.cellWidget(reference_row, 1) if reference_row >= 0 else None
+        command_font = QFont(reference_edit.font() if reference_edit else self.font())
+        reference_height = self.rowHeight(reference_row) if reference_edit else None
+        if row_index >= self.rowCount() or self.cellWidget(row_index, 1) is not None:
+            self.insertRow(row_index)
 
         # 连续发送勾选框 (居中)
         checkbox_widget = QWidget()
         checkbox_layout = QHBoxLayout(checkbox_widget)
         enable_checkbox = QCheckBox()
         enable_checkbox.setChecked(enable)
-        # 连接勾选框状态改变信号，支持批量操作
+        # 连接勾选框状态改变信号,支持批量操作
         enable_checkbox.stateChanged.connect(lambda state, r=row_index: self.on_checkbox_toggled(state, r))
         checkbox_layout.addWidget(enable_checkbox)
         checkbox_layout.setAlignment(Qt.AlignCenter)
@@ -725,7 +718,8 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
         # 命令编辑框 (使用自定义控件)
         # 命令编辑框-右键菜单
-        command_edit = CommandLineEdit(self.config_manager)
+        command_edit = CommandLineEdit(self.config_manager, self.viewport())
+        command_edit.setFont(command_font)
         command_edit.command_table = self
         command_edit.row_index = row_index
         command_edit.setText(command)
@@ -747,24 +741,12 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         self._set_send_button_style(send_btn, False)
         self.setCellWidget(row_index, 2, send_btn)
 
-        # --- DPI-Aware 动态行高 ---
-        # 结合字体度量和屏幕DPI缩放因子, 确保在任何分辨率下都能正确显示
-        font_metrics = command_edit.fontMetrics()
-        
-        # 获取设备像素比, 兼容不同版本的PyQt
-        try:
-            # PyQt5, a more reliable way
-            screen = self.window().windowHandle().screen() if self.window() and self.window().windowHandle() else QApplication.primaryScreen()
-            device_pixel_ratio = screen.devicePixelRatio()
-        except AttributeError:
-            # Fallback for older versions or different environments
-            device_pixel_ratio = 1.0
-
-        # 计算行高: 字体高度 * 2 (为注释和内边距留出空间) * DPI缩放比例
-        # 额外增加一个小的固定值, 作为内边距, 避免文本紧贴边框
-        padding = 4 * device_pixel_ratio
-        # 增加行高倍数, 从1.8到2.0, 为文本提供更充足的垂直空间
-        row_height = int(font_metrics.height() * 2.0 * device_pixel_ratio + padding)
+        # 先完成样式初始化再测量首行;字号,内边距已包含在 Qt 尺寸提示中.
+        command_edit.ensurePolished()
+        send_btn.ensurePolished()
+        row_height = reference_height if reference_height is not None else max(
+            command_edit.sizeHint().height(), send_btn.sizeHint().height(),
+            command_edit.fontMetrics().height() * 2 + 4)
         self.setRowHeight(row_index, row_height)
 
 
@@ -778,8 +760,24 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
         return send_btn
 
+    def replace_command_row(self, row, enable, command, comment):
+        """批量替换时复用同行控件,新增行仍走统一创建入口."""
+        if row >= self.rowCount() or self.cellWidget(row, 1) is None:
+            return self.add_command_row(enable, command, comment, row_index=row)
+        checkbox = self.cellWidget(row, 0).findChild(QCheckBox)
+        edit = self.cellWidget(row, 1)
+        with QSignalBlocker(checkbox), QSignalBlocker(edit):
+            checkbox.setChecked(enable)
+            edit.setText(command)
+        self.comments[row] = comment
+        edit.clear_command_search_highlight()
+        edit.clear_comment_search_highlight()
+        self.on_command_changed(row)
+        self.update_row_replacement_indicator(row)
+        self._set_send_button_style(self.cellWidget(row, 2), False)
+
     def on_command_changed(self, row):
-        """命令内容改变时更新注释显示并处理特殊格式"""
+        """规范 SendHex 的字节分隔并按有效 HEX 字符数保持光标,再通知命令变化."""
         command_edit = self.cellWidget(row, 1)
         if not command_edit:
             return
@@ -812,16 +810,16 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                 formatted_hex += clean_hex[i:i+2] + " "
             formatted_hex = formatted_hex.strip().upper()
             
-            # 规范化格式： "SendHex:" + 格式化后的十六进制 (不强制加空格，保持紧凑)
+            # 规范化格式: "SendHex:" + 格式化后的十六进制 (不强制加空格,保持紧凑)
             new_text = f"{prefix_name}:{formatted_hex}"
             
             if new_text != text:
                 command_edit.blockSignals(True)
                 command_edit.setText(new_text)
                 
-                # 重新计算光标位置：找到第 hex_chars_before_cursor 个十六进制字符的位置
+                # 重新计算光标位置:找到第 hex_chars_before_cursor 个十六进制字符的位置
                 if cursor_pos <= colon_idx + 1:
-                    # 光标在冒号前或刚过冒号，保持相对位置
+                    # 光标在冒号前或刚过冒号,保持相对位置
                     command_edit.setCursorPosition(min(cursor_pos, len(prefix_name) + 1))
                 else:
                     # 光标在十六进制部分
@@ -843,11 +841,11 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         self.commandsChanged.emit(row)
 
     def on_checkbox_toggled(self, state, row):
-        """当勾选框状态改变时，如果该行在选中范围内，同步更新其他选中行"""
+        """切换连续发送勾选状态;当前行属于多选集合时同时应用到所选行."""
         # 获取所有选中的行号
         selected_rows = set(item.row() for item in self.selectionModel().selectedRows())
         
-        # 如果当前行在选中行中，且选中了多行
+        # 如果当前行在选中行中,且选中了多行
         if row in selected_rows and len(selected_rows) > 1:
             is_checked = (state == Qt.Checked)
             for r in selected_rows:
@@ -888,12 +886,15 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         return commands
 
     def get_replacement_rule(self, row):
+        """返回指定行的独立替换规则;没有规则时返回 None."""
         return self.replacement_rules.get(row)
 
     def set_replacement_rule(self, row, rule):
+        """通过批量设置入口更新或清除指定行的独立替换规则."""
         self.set_replacement_rules([row], rule)
 
     def set_replacement_rules(self, rows, rule):
+        """规范化并复制规则到有效行,清除旧校验状态并发出规则变更信号."""
         rule = normalize_rule(rule)
         valid_rows = sorted({row for row in rows if 0 <= row < self.rowCount()})
         for row in valid_rows:
@@ -908,9 +909,11 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         self.replacementRulesChanged.emit()
 
     def edit_replacement_rule(self, row):
+        """打开指定行的替换规则编辑对话框."""
         self.edit_replacement_rules([row])
 
     def edit_replacement_rules(self, rows):
+        """编辑所选有效行的共享规则;只有对话框接受后才应用修改."""
         rows = sorted({row for row in rows if 0 <= row < self.rowCount()})
         if not rows:
             return
@@ -939,15 +942,18 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             )
 
     def get_replacement_target_rows(self, row):
+        """点击行属于多选集合时返回整个选择,否则只返回该行."""
         selected_rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
         if len(selected_rows) > 1 and row in selected_rows:
             return selected_rows
         return [row]
 
     def get_replacement_rules(self):
+        """将行号键转为字符串,返回可写入 JSON 的独立规则映射."""
         return {str(row): rule for row, rule in self.replacement_rules.items()}
 
     def load_replacement_rules(self, rules, notify=True):
+        """加载合法行号的规则并刷新指示;notify=True 时发出规则变更信号."""
         self.replacement_rules = {}
         for row, rule in (rules or {}).items():
             try:
@@ -962,6 +968,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             self.replacementRulesChanged.emit()
 
     def update_row_replacement_indicator(self, row):
+        """同步行奇偶色和独立规则边框,仅在样式属性变化时重新 polish."""
         edit = self.cellWidget(row, 1)
         if not edit:
             return
@@ -984,21 +991,25 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         edit.update()
 
     def update_all_replacement_indicators(self):
+        """遍历所有命令行刷新独立规则的显示标记."""
         for row in range(self.rowCount()):
             self.update_row_replacement_indicator(row)
 
     def clear_validation_states(self):
+        """清空各命令行已有的响应校验颜色状态."""
         for row in range(self.rowCount()):
             edit = self.cellWidget(row, 1)
             if edit:
                 edit.set_validation_state(None)
 
     def _default_response_timeout(self):
+        """以主窗口发送间隔作为响应超时初值(ms),无该控件时使用 100."""
         main_window = self.get_main_window()
         interval_spin = getattr(main_window, "interval_spin", None)
         return interval_spin.value() if interval_spin is not None else 100
 
     def _set_send_button_style(self, button, replaceable):
+        """更新按钮可替换属性;已有样式发生变化时才重新 polish."""
         if button.property("replaceableStyle") == replaceable:
             return
         had_style = button.property("replaceableStyle") is not None
@@ -1009,6 +1020,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             button.update()
 
     def set_send_button_replaceable(self, row, replaceable):
+        """为存在的指定行发送按钮设置可替换状态."""
         button = self.cellWidget(row, 2)
         if button:
             self._set_send_button_style(button, replaceable)
@@ -1022,7 +1034,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         self.replacementRulesChanged.emit()
 
     def show_context_menu(self, position):
-        """显示表格行右键菜单"""
+        """显示命令表操作菜单;输入框区域使用自身菜单,批量插入从所选最小行开始."""
         row = self.rowAt(position.y())
         column = self.columnAt(position.x())
 
@@ -1126,7 +1138,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
         # 在上方插入行
         if num_selected > 1:
-            # 获取选中的最小行号，确保在最上方插入
+            # 获取选中的最小行号,确保在最上方插入
             min_row = min(index.row() for index in selected_rows)
             insert_action = QAction(f"在上方插入 {num_selected} 行", self)
             insert_action.triggered.connect(lambda: self.insert_row_above(min_row, num_selected))
@@ -1137,7 +1149,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
         # 插入多行
         insert_multi_action = QAction("插入多行...", self)
-        # 如果选中多行，则在选中的最上方插入
+        # 如果选中多行,则在选中的最上方插入
         target_row = min(index.row() for index in selected_rows) if num_selected > 1 else row
         insert_multi_action.triggered.connect(lambda: self.insert_multi_rows(target_row))
         menu.addAction(insert_multi_action)
@@ -1166,13 +1178,22 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             self.set_row_comment(row, new_comment)
 
     def add_special_command(self, row, command_type):
-        """添加特殊指令"""
+        """通过对应参数对话框编辑指定行的特殊命令,不立即执行设备动作.
+
+        Args:
+            row (int): 要编辑的零基行号.
+            command_type (SpecialCommandType): 特殊命令种类,决定输入框和参数校验.
+
+        模块相关操作先刷新列表,delay 输入单位为 ms,固件路径可留空使用默认.
+        设置后的命令仍由统一分发入口解释;StopContinuous 的 0/1 控制当前轮次
+        或整个连续循环,不代表设备停止.
+        """
         command_edit = self.cellWidget(row, 1)
         if not command_edit:
             return
 
         current_text = command_edit.text()
-        cmd_type_str, param = UIUtils.parse_special_command(current_text)
+        cmd_type_str, param = command_parts(current_text)
 
         if command_type == "mode":
             initial_val = ""
@@ -1197,10 +1218,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                     # 刷新模块列表
                     main_window.refresh_modules(silent=True)
                     # 显示系统消息
-                    from utils.ui_utils import OutputSource
+                    from core.command_types import OutputSource
                     main_window.output_manager.append_text(f"已创建模块: '{module_name}'", OutputSource.SYSTEM)
         elif command_type == "modeend":
-            # modeend 指令不需要参数，直接设置为 modeend:0
+            # modeend 指令不需要参数,直接设置为 modeend:0
             command_edit.setText("modeend:0")
             self._uncheck_row(row)
 
@@ -1217,7 +1238,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                 # 刷新模块列表
                 main_window.refresh_modules(silent=True)
                 # 显示系统消息
-                from utils.ui_utils import OutputSource
+                from core.command_types import OutputSource
                 main_window.output_manager.append_text("已添加 modeend 指令: 结束当前模块定义", OutputSource.SYSTEM)
         elif command_type == "delay":
             initial_val = 100.0
@@ -1226,10 +1247,10 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                     initial_val = float(param.strip())
                 except:
                     pass
-            # 使用 getDouble 确保只能输入数字，范围 0-1000000ms
+            # 使用 getDouble 确保只能输入数字,范围 0-1000000ms
             delay_time, ok = QInputDialog.getDouble(self, "延迟设置", "请输入延迟时间(ms):", initial_val, 0, 1000000, 1)
             if ok:
-                # 如果是整数，则显示为整数形式
+                # 如果是整数,则显示为整数形式
                 display_val = int(delay_time) if delay_time.is_integer() else delay_time
                 command_edit.setText(f"delay:{display_val}")
                 self._uncheck_row(row)
@@ -1265,7 +1286,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                         command_edit.setText(f"BaudRate:{baudrate_int}")
                         self._uncheck_row(row)
                 except ValueError:
-                    pass  # 无效输入，不做任何操作
+                    pass  # 无效输入,不做任何操作
         elif command_type == "setendlog":
             # 使用正确的转义字符表示
             options = ["None", "\\r\\n", "\\r", "\\n"]
@@ -1288,7 +1309,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             if main_window and hasattr(main_window, 'modules'):
                 # 刷新一下模块列表以确保最新
                 main_window.refresh_modules()
-                # 排除"默认"模块，除非它真的被重命名了
+                # 排除"默认"模块,除非它真的被重命名了
                 options.extend([m for m in main_window.modules.keys() if m != "默认"])
 
             initial_val = "全部"
@@ -1301,15 +1322,15 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
             initial_idx = options.index(initial_val) if initial_val in options else 0
 
-            # 使用 getItem 并允许编辑，方便用户输入新模块名或选择现有模块
+            # 使用 getItem 并允许编辑,方便用户输入新模块名或选择现有模块
             module_name, ok = QInputDialog.getItem(self, "SendMode 设置", "请选择要跳转发送的模块:", options, initial_idx, True)
             if ok and module_name:
                 command_edit.setText(f"SendMode:{module_name}")
                 self._uncheck_row(row)
         elif command_type == "stopcontinuous":
             # StopContinuous 指令 - 可选参数 0 或 1
-            # 0 = 仅停止连续发送（默认）
-            # 1 = 同时停止连续发送和循环发送
+            # 0 = 提前结束本轮,保留外层循环发送.
+            # 1 = 完全停止连续发送和循环发送.
             options = ["0 - 仅停止连续发送", "1 - 同时停止连续和循环发送"]
             initial_idx = 0
             if cmd_type_str == "stopcontinuous":
@@ -1344,7 +1365,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
 
 
     def insert_row_above(self, row, count=1):
-        """在指定行上方插入新行"""
+        """在指定零基行前插入 count 条空命令,迁移注释/规则并重绑后续行信号."""
         if count <= 0:
             return
 
@@ -1379,13 +1400,13 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             self.insert_row_above(row, count)
 
     def insert_rows_from_text(self, row):
-        """根据用户输入的多行文本插入命令行。"""
+        """根据用户输入的多行文本插入命令行."""
         dialog = TextRowsInputDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             self.insert_command_rows_above(row, dialog.get_rows())
 
     def insert_command_rows_above(self, row, commands):
-        """在指定行上方插入带内容的多行命令。"""
+        """在指定行上方插入带内容的多行命令."""
         if not commands:
             return
 
@@ -1416,7 +1437,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             main_window.refresh_modules(silent=True)
 
     def connect_send_button(self, row, send_btn):
-        """连接发送按钮到正确的行号"""
+        """先断开按钮旧连接,再绑定当前行号到主窗口发送入口,避免行移动后错发."""
         # 先断开所有现有连接
         try:
             send_btn.clicked.disconnect()
@@ -1429,7 +1450,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             send_btn.clicked.connect(lambda checked, r=row: main_window.on_send_clicked(r))
 
     def delete_row(self, row):
-        """删除指定行"""
+        """删除指定行,迁移后续注释和规则索引,重绑按钮并刷新模块."""
         self.removeRow(row)
 
         # 更新注释存储
@@ -1455,8 +1476,8 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             main_window.refresh_modules(silent=True)
 
     def delete_selected_rows(self):
-        """删除所有选中的行"""
-        # 获取所有选中的行索引并去重，从大到小排序以安全删除
+        """从后向前删除选中行,再重建注释/规则索引并刷新剩余行绑定."""
+        # 获取所有选中的行索引并去重,从大到小排序以安全删除
         selected_indices = self.selectionModel().selectedRows()
         if not selected_indices:
             return
@@ -1474,7 +1495,7 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
         for old_row, comment in old_comments:
             if old_row in rows_to_delete:
                 continue
-            # 计算新行号：旧行号 - 小于该行号的被删除行数
+            # 计算新行号:旧行号 - 小于该行号的被删除行数
             offset = len([r for r in rows_to_delete if r < old_row])
             new_comments[old_row - offset] = comment
         self.comments = new_comments
@@ -1499,7 +1520,11 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
             main_window.on_send_clicked(row)
 
     def update_send_buttons_after_row(self, start_row):
-        """从指定行开始更新所有发送按钮的编号、连接以及背景颜色"""
+        """刷新指定行及其后方的编号,行号关联与勾选/回车/文本变化信号.
+
+        textChanged 的字符串实参不作为行号;绑定时捕获当前行,确保插入删除后
+        SendHex 格式化和发送动作仍作用于正确行.
+        """
         for row in range(start_row, self.rowCount()):
             # 更新勾选框连接
             checkbox_widget = self.cellWidget(row, 0)
@@ -1530,12 +1555,12 @@ class CommandTableWidget(QTableWidget, BaseWidgetMixin):
                     pass
                 edit.returnPressed.connect(lambda checked=False, r=row: self.on_return_pressed(r))
                 
-                # 更新文本改变连接 (重要：确保 SendHex 格式化在行号变动后依然有效)
+                # 更新文本改变连接 (重要:确保 SendHex 格式化在行号变动后依然有效)
                 try:
                     edit.textChanged.disconnect()
                 except:
                     pass
-                # 注意：textChanged 信号会传递一个字符串参数，需要用 lambda _, r=row 接收
+                # 注意:textChanged 信号会传递一个字符串参数,需要用 lambda _, r=row 接收
                 edit.textChanged.connect(lambda _, r=row: self.on_command_changed(r))
                 
                 self.update_row_replacement_indicator(row)

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-输出规则模块, 负责 GUI 和 CLI 共用的输出过滤, 时间戳, 颜色和提示文案。
+输出规则模块, 负责 GUI 和 CLI 共用的输出过滤, 时间戳, 颜色和提示文案.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
@@ -10,11 +10,54 @@ Website: www.GuoHowe.com
 """
 
 from datetime import datetime
+import uuid
 
-from utils.ui_utils import OutputSource
+from core.command_types import OutputSource
 
 
 ANSI_RESET = "\033[0m"
+
+
+def event_timestamp():
+    """记录事件发生时刻,独立于任何显示开关;跨进程传播该值."""
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def file_operation_event(operation, path, outcome, count=None, error=None, timestamp=None, failure=None):
+    """生成模板及原始 RX 文件操作的唯一系统文案,原始错误仅作结果详情.
+
+    Args:
+        operation: template-import,template-export 或 receive-save.
+        path: 已按调用端工作目录解析的绝对路径.
+        outcome: success/failed/cancelled;RX 使用 started/stopped/failed.
+        count: 已完成模板的命令行数,失败时不报告成功行数.
+        error: 可选执行错误详情,不参与提示文案.
+        timestamp: 原始事件时刻,跨桥接转发时保留.
+        failure: RX 失败阶段 open 或 write,区分未切换文件与设备可能已执行.
+    """
+    labels = {"template-import": "模板导入", "template-export": "模板导出", "receive-save": "接收数据保存"}
+    label = labels[operation]
+    if operation == "receive-save":
+        message = {"started": "接收数据保存已启用（原始 RX 追加）", "stopped": "接收数据保存已停止",
+                   "failed": "接收数据保存失败"}[outcome] + f": {path}"
+        if outcome == "failed" and failure != "open":
+            message += "；设备操作可能已执行，未重试"
+        elif outcome == "failed":
+            message += "；无法打开目标文件，未切换记录器"
+    elif outcome == "success":
+        message = ("模板已导入" if operation == "template-import" else "模板已导出") + f": {path}（{count} 行）"
+    else:
+        message = label + ("已取消" if outcome == "cancelled" else "失败") + f": {path}"
+    event = dict(event="progress", operation=operation, outcome=outcome, path=str(path),
+                 source="error" if outcome == "failed" else "system", system_level="normal",
+                 timestamp=timestamp or event_timestamp(), message=message)
+    event["file_event_id"] = uuid.uuid4().hex
+    if count is not None:
+        event["command_count"] = count
+    if error is not None:
+        event["error"] = str(error)
+    event["failure"] = failure
+    return event
 ANSI_COLORS = {
     "black": "\033[30m",
     "white": "\033[37m",
@@ -74,18 +117,18 @@ class OutputRules:
             return "gray"
         return "white"
 
-    def timestamp_for(self, source_type):
+    def timestamp_for(self, source_type, timestamp=None):
         if not self.timestamp_enabled():
             return ""
-        if source_type == OutputSource.SEND:
-            return self.current_timestamp()
+        if source_type in (OutputSource.SEND, OutputSource.SYSTEM):
+            return self.current_timestamp(timestamp)
         if source_type == OutputSource.RECEIVE and self.last_receive_timestamp:
             self.last_receive_timestamp = False
-            return self.current_timestamp()
+            return self.current_timestamp(timestamp)
         return ""
 
-    def current_timestamp(self):
-        timestamp = datetime.now().strftime(self.timestamp_format)
+    def current_timestamp(self, timestamp=None):
+        timestamp = (datetime.fromisoformat(timestamp) if timestamp else datetime.now()).strftime(self.timestamp_format)
         if self.trim_microseconds and "%f" in self.timestamp_format:
             timestamp = timestamp[:-4] + "]"
         return timestamp + " "
@@ -107,11 +150,10 @@ def rules_from_state(state):
     receive_settings = state.get("receive_settings", {})
     display_sources = receive_settings.get("display_sources") or {}
     send_settings = state.get("send_settings", {})
-    other_settings = state.get("other_settings", {})
 
     def source_filter(source_type):
         if source_type == OutputSource.SEND:
-            return display_sources.get(
+            return send_settings.get("show_send", False) or display_sources.get(
                 "send", receive_settings.get("show_send_source", True)
             )
         if source_type == OutputSource.RECEIVE:
@@ -129,7 +171,7 @@ def rules_from_state(state):
         return True
 
     return OutputRules(
-        timestamp_enabled=lambda: other_settings.get("show_timestamp", False),
+        timestamp_enabled=lambda: receive_settings.get("show_timestamp", False),
         show_send_enabled=lambda: send_settings.get("show_send", False),
         send_color_getter=lambda: send_settings.get("send_color", "红色"),
         source_filter_getter=source_filter,
@@ -183,7 +225,8 @@ def comport_updated(port):
 
 def unsupported_cli_command(command_type):
     """CLI 不支持的特殊命令."""
-    return f"CLI 暂不支持特殊命令: {command_type}"
+    from core.command_parser import COMMANDS
+    return f"CLI 暂不支持特殊命令: {COMMANDS.get(command_type.casefold(), command_type)}"
 
 
 def sendhex_error(error):

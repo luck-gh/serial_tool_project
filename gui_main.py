@@ -15,6 +15,7 @@ import sys
 from PyQt5.QtWidgets import QApplication, QStyleFactory
 
 from main_window import SerialTool
+from app_identity import parse_gui_arguments
 from version_info import TOOL_VERSION, TOOL_VERSION_DATE
 
 
@@ -39,15 +40,17 @@ def main():
         exe_path = os.path.abspath(__file__)
     exe_name = os.path.splitext(os.path.basename(exe_path))[0]
 
+    args, qt_args = parse_gui_arguments(sys.argv[1:])
     hide_console_for_gui()
 
-    app = QApplication(sys.argv)
+    app = QApplication([sys.argv[0], *qt_args])
     app.setStyle(QStyleFactory.create('Fusion'))
 
     window = SerialTool(
         tool_version=TOOL_VERSION,
         tool_version_date=TOOL_VERSION_DATE,
         exe_name=exe_name,
+        config_file=args.config,
     )
     window.show()
     sys.exit(app.exec_())

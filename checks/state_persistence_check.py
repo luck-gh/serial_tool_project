@@ -60,7 +60,7 @@ class GuiAutoSaveTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_control_change_is_saved_after_debounce(self):
-        from PyQt5.QtTest import QTest
+        from PyQt5.QtTest import QSignalSpy
         from main_window import SerialTool
 
         previous_directory = os.getcwd()
@@ -72,7 +72,9 @@ class GuiAutoSaveTests(unittest.TestCase):
 
                 window.baud_combo.setCurrentText("9600")
                 self.assertTrue(window._state_dirty)
-                QTest.qWait(window.STATE_SAVE_DEBOUNCE_MS + 100)
+                # 等待真实去抖信号,不把固定睡眠结束误当作 Qt 已派发定时器.
+                timeout = QSignalSpy(window._state_save_timer.timeout)
+                self.assertTrue(timeout.wait(2 * window.STATE_SAVE_DEBOUNCE_MS))
                 self.assertFalse(window._state_dirty)
 
                 config_path = Path(directory) / "autosave_check_config.json"

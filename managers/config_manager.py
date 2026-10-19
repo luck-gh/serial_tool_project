@@ -96,11 +96,12 @@ class ConfigManager:
         }
     }
 
-    def __init__(self, tool_version="0.0.0", tool_version_date="N/A", config_file="config.json"):
+    def __init__(self, tool_version="0.0.0", tool_version_date="N/A", config_file="config.json", *, config_data=None):
+        """创建配置拥有者;config_data为已解析的独立快照,跳过启动创建/迁移写入."""
         self.tool_version = tool_version
         self.tool_version_date = tool_version_date
         self.config_file = config_file
-        self.config = self.load_config()
+        self.config = self.load_config() if config_data is None else config_data
 
     def load_config(self):
         """加载配置, 如果文件不存在则创建默认配置"""
@@ -390,9 +391,19 @@ class ConfigManager:
 
 
     def set_last_used_directory(self, path):
-        """设置最后使用的目录"""
+        """持久化最近选择目录,未变化不重写,保存失败恢复原值并上报."""
+        previous = self.config.get("last_used_directory")
+        if previous == path:
+            return
         self.config["last_used_directory"] = path
-        self.save_config()
+        try:
+            self.save_config()
+        except Exception:
+            if previous is None:
+                self.config.pop("last_used_directory", None)
+            else:
+                self.config["last_used_directory"] = previous
+            raise
 
     def get_last_used_directory(self):
         """获取最后使用的目录, 如果没有则返回当前工作目录"""

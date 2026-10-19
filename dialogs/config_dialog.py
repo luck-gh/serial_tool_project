@@ -2,39 +2,70 @@
 # -*- coding: utf-8 -*-
 
 """
-配置对话框模块, 负责外部工具和工具相关参数的配置界面。
+配置对话框模块, 负责日志规则和工具参数的草稿编辑及统一提交.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
 Website: www.GuoHowe.com
 """
 
+import copy
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-                             QPushButton, QDialogButtonBox, QFileDialog, QGroupBox, QCheckBox, QComboBox, QSpinBox)
+                             QPushButton, QDialogButtonBox, QFileDialog, QGroupBox, QCheckBox,
+                             QComboBox, QSpinBox, QTabWidget, QWidget, QMessageBox, QGridLayout)
 from managers.config_manager import ConfigManager
+from core.command_types import OutputSource
+from core import gui_config
+from dialogs.save_data_dialog import SystemLogLevelDialog
 
 class ConfigDialog(QDialog):
     """配置对话框"""
-    def __init__(self, config_manager: ConfigManager, parent=None):
+    def __init__(self, config_manager: ConfigManager, parent):
         super().__init__(parent)
         self.config_manager = config_manager
+        self.log_draft = copy.deepcopy(parent.log_settings)
         self.init_ui()
 
     def init_ui(self):
         """初始化界面"""
         self.setWindowTitle("配置")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(680)
 
         layout = QVBoxLayout(self)
 
-        # 版本信息
         version_group = QGroupBox("版本信息")
-        version_layout = QVBoxLayout(version_group)
-        version_layout.addWidget(QLabel(f"工具版本: {self.config_manager.tool_version}"))
-        version_layout.addWidget(QLabel(f"工具更新时间: {self.config_manager.tool_version_date}"))
-        version_layout.addWidget(QLabel(f"配置文件版本: {self.config_manager.get('config_version', 'N/A')}"))
-        version_layout.addWidget(QLabel(f"配置最后更新时间: {self.config_manager.get('config_last_updated', 'N/A')}"))
+        version_layout = QGridLayout(version_group)
+        version_layout.addWidget(QLabel(f"工具版本: {self.config_manager.tool_version}"), 0, 0)
+        version_layout.addWidget(QLabel(f"工具更新时间: {self.config_manager.tool_version_date}"), 1, 0)
+        version_layout.addWidget(QLabel(f"配置文件版本: {self.config_manager.get('config_version', 'N/A')}"), 0, 1)
+        version_layout.addWidget(QLabel(f"配置最后更新时间: {self.config_manager.get('config_last_updated', 'N/A')}"), 1, 1)
+        version_layout.setColumnStretch(0, 1)
+        version_layout.setColumnStretch(1, 1)
         layout.addWidget(version_group)
+
+        file_group = QGroupBox("工作 JSON")
+        file_row = QHBoxLayout(file_group)
+        current_file = QLineEdit(self.config_manager.config_file)
+        current_file.setReadOnly(True)
+        current_file.setToolTip(self.config_manager.config_file)
+        file_row.addWidget(current_file, 1)
+        switch_button = QPushButton("切换工作 JSON...")
+        def switch_work_file():
+            """放弃旧弹窗编辑后切换,避免旧工具值写进新文件."""
+            self.reject()
+            self.parent().choose_work_config()
+        switch_button.clicked.connect(switch_work_file)
+        file_row.addWidget(switch_button)
+        layout.addWidget(file_group)
+        config_group = QGroupBox("配置")
+        config_layout = QVBoxLayout(config_group)
+        self.tabs = QTabWidget()
+        config_layout.addWidget(self.tabs)
+        layout.addWidget(config_group, 1)
+        self._add_log_tab()
+        tools_tab = QWidget()
+        tools_tab_layout = QVBoxLayout(tools_tab)
+        self.tabs.addTab(tools_tab, "工具配置")
 
         # 工具路径配置
         tools_group = QGroupBox("工具路径")
@@ -45,13 +76,127 @@ class ConfigDialog(QDialog):
             display_name = self.config_manager.get_tool_display_name(tool_name)
             self.add_tool_config_row(tools_layout, tool_name, display_name)
 
-        layout.addWidget(tools_group)
+        tools_tab_layout.addWidget(tools_group)
+        tools_tab_layout.addStretch()
 
         # 对话框按钮
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+
+    def _add_log_tab(self):
+        """只编辑日志草稿,确定前不改变收录、历史上限或文件路径."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+        self.tabs.addTab(tab, "日志配置")
+        hint = QLabel("设置日志收录规则。持续保存的开关在主界面“接收设置”中；点击确定后生效。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        limit_row = QHBoxLayout()
+        limit_row.addWidget(QLabel("日志上限:"))
+        self.log_limit_spin = QSpinBox()
+        self.log_limit_spin.setRange(1, 1024)
+        self.log_limit_spin.setValue(self.log_draft["limit_mb"])
+        self.log_limit_spin.setSuffix(" MB")
+        self.log_limit_spin.setToolTip("1 MB = 1,000,000 字节。限制日志记录及其字段的内存预算，不代表整个进程或文件大小。")
+        limit_row.addWidget(self.log_limit_spin)
+        limit_row.addStretch()
+        layout.addLayout(limit_row)
+        self.retain_all_check = QCheckBox("保留全量信息")
+        self.retain_all_check.setChecked(self.log_draft["retain_all"])
+        self.retain_all_check.setToolTip("收录所有来源和系统级别；时间戳独立控制。关闭后恢复自定义选择。")
+        self.retain_all_check.toggled.connect(self._render_log_controls)
+        layout.addWidget(self.retain_all_check)
+        sources_group = QGroupBox("保存到日志中")
+        sources_layout = QVBoxLayout(sources_group)
+        source_row = QHBoxLayout()
+        self.log_source_checks = {}
+        for source, label in ((OutputSource.SEND, "发送"), (OutputSource.RECEIVE, "接收"),
+                              (OutputSource.SYSTEM, "系统"), (OutputSource.ERROR, "错误")):
+            checkbox = QCheckBox(label)
+            checkbox.toggled.connect(lambda checked, source=source: self._set_log_source(source, checked))
+            self.log_source_checks[source] = checkbox
+            source_row.addWidget(checkbox)
+        sources_layout.addLayout(source_row)
+        levels_row = QHBoxLayout()
+        levels_row.addWidget(QLabel("系统级别:"))
+        self.log_system_level_button = QPushButton()
+        self.log_system_level_button.clicked.connect(self._choose_log_levels)
+        levels_row.addWidget(self.log_system_level_button)
+        levels_row.addStretch()
+        sources_layout.addLayout(levels_row)
+        layout.addWidget(sources_group)
+        self.log_timestamp_check = QCheckBox("保留时间戳")
+        self.log_timestamp_check.setChecked(self.log_draft["keep_timestamp"])
+        layout.addWidget(self.log_timestamp_check)
+        directory_row = QHBoxLayout()
+        directory_row.addWidget(QLabel("日志目录:"))
+        self.log_directory_input = QLineEdit(self.log_draft["log_directory"])
+        self.log_directory_input.setReadOnly(True)
+        self.log_directory_input.setPlaceholderText("工作 JSON 所在目录下的 logs")
+        directory_row.addWidget(self.log_directory_input, 1)
+        self.log_directory_button = QPushButton("浏览…")
+        self.log_directory_button.clicked.connect(self._choose_log_directory)
+        directory_row.addWidget(self.log_directory_button)
+        layout.addLayout(directory_row)
+        layout.addStretch()
+        self.parent().show_send_check.toggled.connect(self._render_log_controls)
+        self.parent().save_full_log_check.toggled.connect(self._refresh_directory_access)
+        self.parent().output_manager.archive_changed.connect(self._refresh_directory_access)
+        self._render_log_controls()
+        self._refresh_directory_access()
+
+    def _set_log_source(self, source, checked):
+        """修改一项草稿来源,不触发运行态或文件保存."""
+        self.log_draft["sources"][source.value] = checked
+        self._render_log_controls()
+
+    def _render_log_controls(self, _checked=None):
+        """显示有效勾选,草稿基础选择不受全量及发送快捷入口覆盖."""
+        all_sources = self.retain_all_check.isChecked()
+        shortcut = self.parent().show_send_check.isChecked()
+        for source, checkbox in self.log_source_checks.items():
+            forced_send = source == OutputSource.SEND and shortcut
+            forced = all_sources or forced_send
+            previous = checkbox.blockSignals(True)
+            checkbox.setChecked(self.log_draft["sources"][source.value] or forced)
+            checkbox.setEnabled(not forced)
+            reason = "由发送设置中的“显示发送字符串”开启" if forced_send else "由“保留全量信息”开启"
+            checkbox.setToolTip(reason + "；关闭后恢复原选择" if forced else "")
+            checkbox.blockSignals(previous)
+        count = 4 if all_sources else sum(self.log_draft["system_levels"].values())
+        self.log_system_level_button.setText(f"选择级别 ({count}/4)")
+        self.log_system_level_button.setEnabled(not all_sources and self.log_draft["sources"]["system"])
+
+    def _choose_log_levels(self):
+        """在子对话框确认级别,外层取消仍可舍弃这些编辑."""
+        selected = {level for level, enabled in self.log_draft["system_levels"].items() if enabled}
+        dialog = SystemLogLevelDialog(selected, self)
+        if dialog.exec_() == QDialog.Accepted:
+            selected = dialog.selected_levels()
+            self.log_draft["system_levels"] = {level: level in selected for level in self.log_draft["system_levels"]}
+            self._render_log_controls()
+
+    def _refresh_directory_access(self, _checked=None):
+        """保存开启或有未确认批次时,禁止在弹窗中另选目录."""
+        available = self.parent().can_change_log_directory()
+        self.log_directory_button.setEnabled(available)
+        self.log_directory_button.setToolTip("修改目录前请停止保存并等待尾部写完；失败时先另存未确认日志" if not available else "")
+
+    def _choose_log_directory(self):
+        """选择草稿目录;实际切换留到外层配置事务提交."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "选择日志目录", self.log_directory_input.text() or self.parent().log_directory())
+        if directory:
+            self.log_directory_input.setText(directory)
+
+    def _log_patch(self):
+        """快照只包含日志规则,不覆盖编辑期间可能因错误停存的主界面开关."""
+        return dict(copy.deepcopy(self.log_draft), limit_mb=self.log_limit_spin.value(),
+                    retain_all=self.retain_all_check.isChecked(), keep_timestamp=self.log_timestamp_check.isChecked(),
+                    log_directory=self.log_directory_input.text())
 
     def add_tool_config_row(self, layout, tool_name, label_text):
         """
@@ -578,65 +723,17 @@ class ConfigDialog(QDialog):
             path_edit.setText(filename)
 
     def accept(self):
-        """保存配置, 仅在有更改时更新（通用化）"""
-        # 遍历所有已注册的工具，保存配置
-        for tool_name in self.config_manager.get_all_tool_names():
-            # 获取控件
-            check_widget = getattr(self, f"{tool_name}_check", None)
-            always_on_top_widget = getattr(self, f"{tool_name}_always_on_top_check", None)
-            edit_widget = getattr(self, f"{tool_name}_edit", None)
-
-            if not check_widget or not edit_widget:
-                continue
-
-            # 获取当前配置
-            current_config = self.config_manager.get_tool_config(tool_name)
-            current_path = current_config.get("path", "") if current_config else ""
-            current_enabled = current_config.get("enabled", False) if current_config else False
-            current_always_on_top = current_config.get("always_on_top", False) if current_config else False
-
-            # 获取新配置
-            new_path = edit_widget.text().strip()
-            new_enabled = check_widget.isChecked()
-            new_always_on_top = always_on_top_widget.isChecked() if always_on_top_widget else False
-
-            # 准备额外参数
-            extra_params = {}
-
-            # 检查是否有工具特定的参数（从参数对话框）
-            if tool_name == "bin_hex_converter" and hasattr(self, 'bin_hex_converter_params'):
-                extra_params = self.bin_hex_converter_params
-            elif tool_name == "number_conversion_dialog" and hasattr(self, 'number_conversion_dialog_params'):
-                extra_params = self.number_conversion_dialog_params
-            elif tool_name == "firmware_downloader" and hasattr(self, 'firmware_downloader_params'):
-                extra_params = self.firmware_downloader_params
-            else:
-                # 从当前配置中保留额外参数
-                if current_config:
-                    for key in current_config.keys():
-                        if key not in ['path', 'enabled', 'always_on_top']:
-                            extra_params[key] = current_config[key]
-
-            # 添加always_on_top到额外参数
-            extra_params['always_on_top'] = new_always_on_top
-
-            # 检查是否有变化
-            has_changes = (current_path != new_path or current_enabled != new_enabled or current_always_on_top != new_always_on_top)
-
-            # 检查额外参数是否有变化
-            if current_config and extra_params:
-                for key, value in extra_params.items():
-                    if current_config.get(key) != value:
-                        has_changes = True
-                        break
-
-            # 如果有变化则保存
-            if has_changes:
-                self.config_manager.set_tool_config(
-                    tool_name,
-                    new_enabled,
-                    new_path,
-                    **extra_params
-                )
-
+        """日志与工具草稿通过同一配置事务保存,失败保留弹窗供修正."""
+        tools = {}
+        for name in self.config_manager.get_all_tool_names():
+            tools[name] = dict(
+                enabled=getattr(self, f"{name}_check").isChecked(),
+                always_on_top=getattr(self, f"{name}_always_on_top_check").isChecked(),
+                path=getattr(self, f"{name}_edit").text().strip(),
+                **getattr(self, f"{name}_params", {}))
+        try:
+            gui_config.apply(self.parent(), {"state": {"log_settings": self._log_patch()}, "tools": tools})
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "配置未保存", str(exc))
+            return
         super().accept()

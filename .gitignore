@@ -40,6 +40,10 @@ dist/*
 
 # 测试
 .pytest_cache/
+.venv/
+.venv-build/
+.runtime-tmp/
+.codex_build/
 test/
 test*
 

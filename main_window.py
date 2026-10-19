@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-主窗口模块, 负责串口工具 GUI 布局, 用户交互, 状态保存和远程控制协调。
+主窗口模块, 负责串口工具 GUI 布局, 用户交互, 状态保存和远程控制协调.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
@@ -11,11 +11,15 @@ Website: www.GuoHowe.com
 
 import sys
 import os
-import csv
+import copy
+import time
+from core.command_templates import template_path
 import re
 import socket
-import tempfile
 import weakref
+import base64
+import codecs
+import uuid
 from collections import OrderedDict
 
 import serial
@@ -30,17 +34,22 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QProcess
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QIcon, QKeySequence
 
-from utils.ui_utils import UIUtils, Colors, resource_path, OutputSource, SpecialCommandType
+from core.command_types import OutputSource, SpecialCommandType
+from utils.ui_utils import UIUtils, Colors, resource_path
+from core.command_parser import command_parts, unescape_text, normalize_ending_text, get_ending_bytes
 from widgets.custom_widgets import CustomTextBrowser, CollapsibleGroupBox, ClickableComboBox
-from widgets.command_widgets import CommandRowsTextParser, CommandTableWidget
+from widgets.command_widgets import CommandTableWidget
 from widgets.find_widgets import FindBar
 from dialogs.replacement_rule_dialog import ReplacementRuleDialog
-from dialogs.save_data_dialog import SaveDataSelectionDialog
+from dialogs.save_data_dialog import SaveDataSelectionDialog, SystemLogLevelDialog
 from dialogs.help_dialog import HelpDialog
 from managers.output_manager import OutputManager
 from managers.special_command_manager import SpecialCommandManager
 from core.serial_thread import SerialThread
+from core.serial_config import validate_baudrate, validate_serial_config, serial_kwargs
 from core.remote_control import RemoteControlClient, RemoteControlServer
+from core.remote_firmware import RemoteFirmwareHost, RemoteFirmwareClient
+from core.gui_cli_bridge import GuiCliBridge
 from core import output_rules
 from app_identity import get_config_file
 from managers.config_manager import ConfigManager
@@ -53,53 +62,27 @@ from core.text_search import (
     compile_diagnostic_response_pattern,
 )
 from core.response_validation import ResponseValidationManager
+from core.firmware_worker import FirmwareDownloadWorker
+from core.template_worker import TemplateWorker
 from core.firmware_download import (
     FIRMWARE_TOOL_NAME,
-    FirmwareDownloadWorker,
     build_download_config,
     resolve_firmware_path,
+    get_firmware_downloader_class,
 )
 
 
-class SystemLogLevelDialog(QDialog):
-    """系统日志级别多选对话框，勾选过程中保持打开。"""
-
-    LEVELS = (
-        ("normal", "常规"),
-        ("warning", "告警"),
-        ("info", "信息"),
-        ("debug", "调试"),
-    )
-
-    def __init__(self, selected_levels, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("系统日志级别")
-        self.setMinimumWidth(260)
-        layout = QVBoxLayout(self)
-
-        group = QGroupBox("显示系统日志级别（可多选）")
-        group_layout = QVBoxLayout(group)
-        self.level_checks = {}
-        for level, label in self.LEVELS:
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(level in selected_levels)
-            self.level_checks[level] = checkbox
-            group_layout.addWidget(checkbox)
-        layout.addWidget(group)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def selected_levels(self):
-        return {
-            level for level, checkbox in self.level_checks.items()
-            if checkbox.isChecked()
-        }
-
 class SerialTool(QMainWindow, BaseWidgetMixin):
-    """串口调试工具主窗口"""
+    """串口助手主窗口,协调本地串口,远程会话,固件任务及 CLI 桥接.
+
+    控件与业务协调器在 GUI 线程运行,实际串口读取,TCP 收发和固件下载
+    由专用工作线程执行.设备入口共享下载占用检查,连续命令通过请求 ID
+    等待设备端回执.窗口保存用户配置,但 CLI 桥接消息不经配置文件中转.
+    下载未结束时关闭窗口只请求取消,待资源释放后才能正常关闭.
+    """
+    firmware_log = pyqtSignal(str, str)
+    firmware_progress = pyqtSignal(int, int, str)
+
     LEFT_PORT_COMBO_VISIBLE_CHARS = 7
     LEFT_PANEL_DEFAULT_EXTRA_WIDTH = 60
     SYNC_BUTTON_WIDTH = 30
@@ -115,7 +98,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         },
         "response_validation": {
             "enabled": False,
-            "expression": r"read [01] 0x\w* 1\W*\w*\s*=\s*0*$3\W",
+            "expression": (
+                r"\bread[ \t]+$1[ \t]+0x$2[ \t]+1[ \t]*\r?\n"
+                r"[ \t]*(?:0x)?$2[ \t]*=[ \t]*(?:0x)?0*$3[ \t]*\r?\n"
+            ),
             "timeout_ms": 100,
             "on_failure": "continue",
             "color_policy": "sticky_failure",
@@ -123,7 +109,17 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         },
     }
 
-    def __init__(self, tool_version="0.0.0", tool_version_date="N/A", exe_name="main"):
+    def __init__(self, tool_version="0.0.0", tool_version_date="N/A", exe_name="main", config_file=None):
+        """创建窗口,读取配置并启动本机 CLI 桥接,不自动打开串口或远程连接.
+
+        Args:
+            tool_version (str): 应用版本,默认 0.0.0,用于配置版本检查.
+            tool_version_date (str): 版本日期,默认 N/A,用于配置和界面元信息.
+            exe_name (str): 当前入口名称,默认 main;归一化后决定配置文件名,
+                相对配置路径基于进程工作目录,也用于定位 CLI 桥接端点.
+            config_file (str | None): 显式配置路径;缺省按入口名生成,
+                相对路径与 CLI 一样基于进程工作目录.
+        """
         super().__init__()
         self.tool_version = tool_version
         self.tool_version_date = tool_version_date
@@ -153,6 +149,22 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.firmware_download_process = None
         self._firmware_download_completion = None
         self._firmware_download_restore_serial = False
+        self.remote_capabilities = {}
+        self._remote_device_pending = {}
+        self._remote_sequence_failed = False
+        self._command_generation = 0
+        self._receive_decoder = codecs.getincrementaldecoder("utf-8")()
+        self.remote_firmware_host = RemoteFirmwareHost(
+            self._send_host_task_message, self._prepare_host_download,
+            self._acquire_download_serial, self._release_download_serial,
+            self._firmware_download_log, self)
+        self.remote_firmware_client = RemoteFirmwareClient(self._send_remote_message, self)
+        self.remote_firmware_host.state_changed.connect(self.send_remote_serial_config)
+        self.remote_firmware_client.progress.connect(self._remote_download_progress)
+        self.remote_firmware_client.finished.connect(self._complete_firmware_download)
+        self._download_progress_dialog = None
+        self.gui_cli_bridge = None
+        self._last_firmware_result = (False, "下载未启动")
         self.current_module = "全部"
         self.modules = OrderedDict()  # 存储模块信息
         self.global_replacement_rule = normalize_rule(self.DEFAULT_GLOBAL_REPLACEMENT_RULE)
@@ -166,8 +178,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.save_source_selection = set(OutputSource)
         self.system_level_selection = {"normal", "warning", "info", "debug"}
         self.save_system_level_selection = {"normal", "warning", "info", "debug"}
+        from core.log_settings import settings_from_state
+        self.log_settings = settings_from_state({})
+        self.log_settings.pop("save_full_log")
+        self._send_display_selected = True
         self._loading_state = True
         self._state_dirty = False
+        self._template_task = None
+        self._closing_logs = False
 
         self._state_save_timer = QTimer(self)
         self._state_save_timer.setSingleShot(True)
@@ -178,8 +196,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._state_fallback_timer.setInterval(self.STATE_SAVE_FALLBACK_MS)
         self._state_fallback_timer.timeout.connect(self._flush_pending_state)
 
-        # 使用规范化后的可执行文件名来构建配置文件名。
-        config_file = get_config_file(self.exe_name)
+        # 显式路径与 CLI 共用配置管理器和端点解析,缺省保留原命名规则.
+        config_file = config_file or get_config_file(self.exe_name)
         try:
             self.config_manager = ConfigManager(
                 tool_version=self.tool_version,
@@ -201,13 +219,19 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         try:
             self.init_ui()
             self.refresh_ports()
+            # 保留未加载工作文件时的控件默认值,切换缺省字段不继承旧工作内容.
+            self._default_work_state = self.snapshot_state()
+            self._default_work_state['commands'] = [[False, '', ''] for _ in range(10)]
             self.load_state()
         finally:
             self._loading_state = False
+        self._apply_log_settings()
         self._state_fallback_timer.start()
+        self.gui_cli_bridge = GuiCliBridge(self, self.config_manager.config_file)
+        self.gui_cli_bridge.start()
 
     def add_initial_commands(self, addlen):
-        """添加10条空的初始命令"""
+        """通过统一建行入口追加 addlen 条空命令,避免重复绑定发送按钮."""
         for i in range(addlen):
             row = self.command_table.rowCount()
             # 直接添加行, add_command_row内部已经处理了按钮连接, 不需要再次连接
@@ -371,11 +395,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.output_manager = OutputManager(
             self.receive_browser,
             lambda: self.timestamp_check.isChecked(),
-            lambda: self.show_send_check.isChecked(),
             self.get_send_color,
             self.get_source_filter,
             self.get_system_level_filter,
+            capture_filter=self.get_log_capture_filter,
+            keep_timestamp=lambda: self.log_settings["keep_timestamp"],
         )
+        self.output_manager.archive_failed.connect(self._on_log_archive_failed)
+        self.output_manager.archive_idle.connect(self._on_log_archive_idle)
+        self.output_manager.archive_changed.connect(self._update_log_status)
 
         # 连接信号
         self.connect_signals()
@@ -384,7 +412,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.update_tools_state()
 
     def _set_h_splitter_sizes(self, sizes=None):
-        """设置主分割器宽度, 避免左侧设置区初始状态过窄。"""
+        """设置主分割器宽度, 避免左侧设置区初始状态过窄."""
         if sizes and len(sizes) >= 2:
             try:
                 left_width = int(sizes[0])
@@ -402,11 +430,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.h_splitter.setSizes([left_width, right_width])
 
     def _width_for_chars(self, widget, visible_chars, extra_width=36):
-        """按当前字体估算控件宽度, 适配不同 DPI/缩放。"""
+        """按当前字体估算控件宽度, 适配不同 DPI/缩放."""
         return widget.fontMetrics().horizontalAdvance("M" * visible_chars) + extra_width
 
     def _left_panel_min_width(self):
-        """按当前字体估算左侧面板最小可读宽度。"""
+        """按当前字体估算左侧面板最小可读宽度."""
         label_width = self._left_basic_label_width()
         scrollbar_width = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
         frame_width = self.style().pixelMetric(QStyle.PM_DefaultFrameWidth)
@@ -414,50 +442,57 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return label_width + self._left_control_area_width() + margins_and_spacing
 
     def _left_panel_default_width(self):
+        """返回左侧面板最小宽度加默认扩展量的初始宽度."""
         return self._left_panel_min_width() + self.LEFT_PANEL_DEFAULT_EXTRA_WIDTH
 
     def _compact_button_width(self, text):
+        """按当前字体测量按钮文本宽度并预留水平内边距."""
         return self.fontMetrics().horizontalAdvance(text) + 28
 
     def _set_compact_button_width(self, button):
+        """根据按钮文字固定宽度及尺寸策略,使左侧按钮保持紧凑."""
         button.setFixedWidth(self._compact_button_width(button.text()))
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     def _left_port_combo_width(self):
+        """按预设可见字符数计算端口下拉框的逻辑像素宽度."""
         return self._width_for_chars(self, self.LEFT_PORT_COMBO_VISIBLE_CHARS)
 
     def _left_control_area_width(self):
+        """合计刷新按钮,间距和端口下拉框的宽度."""
         return self._compact_button_width("刷新") + 6 + self._left_port_combo_width()
 
     def _set_left_control_expanding(self, widget):
-        """左侧普通控件只随布局伸缩, 不人为设置最小宽度。"""
+        """左侧普通控件只随布局伸缩, 不人为设置最小宽度."""
         widget.setMinimumWidth(0)
         widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def _set_port_combo_compact_width(self):
-        """端口框只保留短显示宽度, 完整名称通过提示查看。"""
+        """端口框只保留短显示宽度, 完整名称通过提示查看."""
         self.port_combo.setMinimumContentsLength(self.LEFT_PORT_COMBO_VISIBLE_CHARS)
         self.port_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.port_combo.setMinimumWidth(self._left_port_combo_width())
         self.port_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def _left_basic_label_width(self):
+        """按预设标签字符数计算左侧基础设置标签宽度."""
         return self.fontMetrics().horizontalAdvance("波特率:") + 8
 
     def _create_left_basic_label(self, text):
+        """创建固定宽度的左侧基础设置标签."""
         label = QLabel(text)
         label.setFixedWidth(self._left_basic_label_width())
         label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         return label
 
     def _add_port_combo_item(self, display):
-        """添加串口下拉项, 并用提示显示完整端口名称。"""
+        """添加串口下拉项, 并用提示显示完整端口名称."""
         index = self.port_combo.count()
         self.port_combo.addItem(display)
         self.port_combo.setItemData(index, display, Qt.ToolTipRole)
 
     def _sync_port_combo_display(self, text=None):
-        """同步端口提示, 并让窄输入框优先显示左侧字符。"""
+        """同步端口提示, 并让窄输入框优先显示左侧字符."""
         self.port_combo.setToolTip(text if text is not None else self.port_combo.currentText())
         line_edit = self.port_combo.lineEdit() if self.port_combo.isEditable() else None
         if line_edit:
@@ -465,7 +500,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             line_edit.setCursorPosition(0)
 
     def update_tools_state(self):
-        """根据配置更新所有工具按钮状态（通用方法）"""
+        """根据配置更新所有工具按钮状态(通用方法)"""
         for tool_name, button in self.tool_buttons.items():
             is_enabled = self.config_manager.is_tool_enabled(tool_name)
             is_available = self.config_manager.is_tool_available(tool_name)
@@ -479,7 +514,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 button.setStyleSheet("QPushButton { background-color: #cccccc; color: #888888; }")
 
     def create_left_panel(self):
-        """创建左侧设置面板 (可滚动) """
+        """建立可滚动设置面板和工具入口,基础控件随布局伸缩并屏蔽滚轮误改."""
         # 滚动区域
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -504,7 +539,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._set_compact_button_width(self.refresh_ports_btn)
         self._bind_momentary_button_feedback(self.refresh_ports_btn, Colors.GREEN_BUTTON)
 
-        # 左侧面板最小宽度以端口行控制区为基准, 普通控件随布局自动伸缩。
+        # 左侧面板最小宽度以端口行控制区为基准, 普通控件随布局自动伸缩.
         # 端口选择
         port_layout = QHBoxLayout()
         port_layout.addWidget(self._create_left_basic_label("端口:"))
@@ -512,7 +547,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.port_combo.setEditable(True)
         self.port_combo.popupAboutToBeShown.connect(self.refresh_ports)
         self.port_combo.currentTextChanged.connect(self._sync_port_combo_display)
-        self.port_combo.installEventFilter(self)            # 禁用滚轮
+        self.port_combo.installEventFilter(self)  # 禁用滚轮
         self._set_port_combo_compact_width()
         port_layout.addWidget(self.refresh_ports_btn)
         port_layout.addWidget(self.port_combo)
@@ -525,7 +560,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.baud_combo.setEditable(True)
         self.baud_combo.addItems(["9600", "115200", "57600", "38400", "19200", "4800"])
         self.baud_combo.setCurrentText("115200")
-        self.baud_combo.installEventFilter(self)            # 禁用滚轮
+        self.baud_combo.installEventFilter(self)  # 禁用滚轮
         self._set_left_control_expanding(self.baud_combo)
         baud_layout.addWidget(self.baud_combo)
         basic_layout.addLayout(baud_layout)
@@ -536,7 +571,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.data_bits_combo = QComboBox()
         self.data_bits_combo.addItems(["5", "6", "7", "8"])
         self.data_bits_combo.setCurrentText("8")
-        self.data_bits_combo.installEventFilter(self)       # 禁用滚轮
+        self.data_bits_combo.installEventFilter(self)  # 禁用滚轮
         self._set_left_control_expanding(self.data_bits_combo)
         data_bits_layout.addWidget(self.data_bits_combo)
         basic_layout.addLayout(data_bits_layout)
@@ -547,7 +582,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.parity_combo = QComboBox()
         self.parity_combo.addItems(["None", "Even", "Odd", "Mark"])
         self.parity_combo.setCurrentText("None")
-        self.parity_combo.installEventFilter(self)          # 禁用滚轮
+        self.parity_combo.installEventFilter(self)  # 禁用滚轮
         self._set_left_control_expanding(self.parity_combo)
         parity_layout.addWidget(self.parity_combo)
         basic_layout.addLayout(parity_layout)
@@ -558,7 +593,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.stop_bits_combo = QComboBox()
         self.stop_bits_combo.addItems(["1", "1.5", "2"])
         self.stop_bits_combo.setCurrentText("1")
-        self.stop_bits_combo.installEventFilter(self)       # 禁用滚轮
+        self.stop_bits_combo.installEventFilter(self)  # 禁用滚轮
         self._set_left_control_expanding(self.stop_bits_combo)
         stop_bits_layout.addWidget(self.stop_bits_combo)
         basic_layout.addLayout(stop_bits_layout)
@@ -585,17 +620,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         remote_mode_layout = QHBoxLayout()
         remote_mode_layout.addWidget(QLabel("模式:"))
         self.remote_mode_combo = QComboBox()
-        self.remote_mode_combo.addItems(["主控端", "远程端"])
+        # 显示名称说明职责; userData 沿用现有 JSON 配置值,不由文案决定角色.
+        self.remote_mode_combo.addItem("设备端（连接硬件）", "主控端")
+        self.remote_mode_combo.addItem("控制端（远程操作）", "远程端")
         self.remote_mode_combo.installEventFilter(self)
         self._set_left_control_expanding(self.remote_mode_combo)
         remote_mode_layout.addWidget(self.remote_mode_combo)
         remote_layout.addLayout(remote_mode_layout)
 
         remote_host_layout = QHBoxLayout()
-        remote_host_layout.addWidget(QLabel("地址:"))
-        self.remote_host_input = QComboBox()
+        self.remote_host_label = QLabel("地址:")
+        remote_host_layout.addWidget(self.remote_host_label)
+        self.remote_host_input = ClickableComboBox()
         self.remote_host_input.setEditable(True)
         self.remote_host_input.addItem("127.0.0.1")
+        self.remote_host_input.popupAboutToBeShown.connect(self.update_remote_host_options)
         self.remote_host_input.installEventFilter(self)
         self._set_left_control_expanding(self.remote_host_input)
         remote_host_layout.addWidget(self.remote_host_input)
@@ -607,7 +646,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.remote_port_spin.setRange(1, 65535)
         self.remote_port_spin.setValue(8765)
         self._set_left_control_expanding(self.remote_port_spin)
-        self.remote_port_spin.installEventFilter(self)            # 禁用滚轮
+        self.remote_port_spin.installEventFilter(self)  # 禁用滚轮
         remote_port_layout.addWidget(self.remote_port_spin)
         remote_layout.addLayout(remote_port_layout)
 
@@ -668,6 +707,29 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         system_level_layout.addStretch()
         receive_layout.addLayout(system_level_layout)
 
+        self.timestamp_check = QCheckBox("显示时间戳")
+        self.timestamp_check.setChecked(False)
+        receive_layout.addWidget(self.timestamp_check)
+
+        archive_row = QHBoxLayout()
+        self.save_full_log_check = QCheckBox("保存完整日志")
+        self.save_full_log_check.setToolTip("持续分块保存开启期间收录的信息；右侧选择日志目录，底部“配置”调整日志规则。")
+        archive_row.addWidget(self.save_full_log_check)
+        archive_row.addStretch()
+        self.log_directory_button = QPushButton("日志目录…")
+        self.log_directory_button.clicked.connect(self._choose_log_directory)
+        archive_row.addWidget(self.log_directory_button)
+        receive_layout.addLayout(archive_row)
+        self.log_status_label = QLabel()
+        self.log_status_label.setTextFormat(Qt.PlainText)
+        self.log_status_label.setWordWrap(True)
+        self.log_status_label.setVisible(False)
+        receive_layout.addWidget(self.log_status_label)
+        self.recover_log_button = QPushButton("另存未确认日志…")
+        self.recover_log_button.setVisible(False)
+        self.recover_log_button.clicked.connect(self._recover_log_archive)
+        receive_layout.addWidget(self.recover_log_button)
+
         self.save_btn = QPushButton("保存数据")
         self._set_left_control_expanding(self.save_btn)
         self._bind_momentary_button_feedback(self.save_btn, Colors.GREEN_BUTTON)
@@ -691,8 +753,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.ending_combo.addItems(["None", r"\r\n", r"\r", r"\n"])
         self.ending_combo.setCurrentText(r"\r\n")
         self._set_left_control_expanding(self.ending_combo)
-        self.ending_combo.installEventFilter(self)          # 禁用滚轮
-        # 发送选项统一使用两列网格：左侧对齐, 右侧随侧栏宽度伸缩。
+        self.ending_combo.installEventFilter(self)  # 禁用滚轮
+        # 发送选项统一使用两列网格:左侧对齐, 右侧随侧栏宽度伸缩.
         send_options_grid = QGridLayout()
         send_options_grid.setContentsMargins(0, 0, 0, 0)
         send_options_grid.setHorizontalSpacing(8)
@@ -707,13 +769,14 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         # 显示发送字符串
         self.show_send_check = QCheckBox("显示发送字符串")
         self.show_send_check.setChecked(False)
+        self.show_send_check.setToolTip("开启时临时启用日志收录和接收区显示中的发送；关闭后恢复各自原选择。")
         send_options_grid.addWidget(self.show_send_check, 1, 0)
 
         self.send_color_combo = QComboBox()
         self.send_color_combo.addItems(["红色", "蓝色", "绿色", "紫色", "黑色"])
         self.send_color_combo.setCurrentText("红色")
         self._set_left_control_expanding(self.send_color_combo)
-        self.send_color_combo.installEventFilter(self)      # 禁用滚轮
+        self.send_color_combo.installEventFilter(self)  # 禁用滚轮
         send_options_grid.addWidget(self.send_color_combo, 1, 1)
 
         self.replace_send_check = QCheckBox("替换发送")
@@ -752,17 +815,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
         layout.addWidget(self.send_group)
 
-        # 其他设置
-        self.other_group = CollapsibleGroupBox("其他设置")
-        other_layout = self.other_group.content_layout
-        other_layout.setSpacing(8)
-
-        self.timestamp_check = QCheckBox("显示时间戳")
-        self.timestamp_check.setChecked(False)
-        other_layout.addWidget(self.timestamp_check)
-
-        layout.addWidget(self.other_group)
-
         # 模板相关
         self.template_group = CollapsibleGroupBox("模板相关")
         template_layout = self.template_group.content_layout
@@ -789,7 +841,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         # 工具相关
         self.tools_group = CollapsibleGroupBox("工具相关")
 
-        # 动态创建工具按钮（基于配置管理器的注册表）
+        # 动态创建工具按钮(基于配置管理器的注册表)
         self.tool_buttons = {}  # 保存工具按钮引用 {tool_name: button}
         for tool_name in self.config_manager.get_all_tool_names():
             button_text = self.config_manager.get_tool_button_text(tool_name)
@@ -920,7 +972,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.jump_module_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         continuous_layout.addWidget(self.jump_module_combo, 1)
 
-        # Mode Sync Button - 将跳转模块同步到发送模块
+        # 模块同步按钮 - 将跳转模块同步到发送模块
         self.sync_mode_forward_btn = QPushButton("->")
         self.sync_mode_forward_btn.setFixedWidth(self.SYNC_BUTTON_WIDTH)
         self.sync_mode_forward_btn.setToolTip("将跳转模式同步到发送模式")
@@ -932,7 +984,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._bind_momentary_button_feedback(self.jump_to_module_btn, Colors.BLUE_BUTTON)
         continuous_layout.addWidget(self.jump_to_module_btn)
 
-        # Mode Sync Button - 将发送模块同步到跳转模块
+        # 模块同步按钮 - 将发送模块同步到跳转模块
         self.sync_mode_btn = QPushButton("<-")
         self.sync_mode_btn.setFixedWidth(self.SYNC_BUTTON_WIDTH)
         self.sync_mode_btn.setToolTip("将发送模式同步到跳转模式")
@@ -976,7 +1028,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return panel
 
     def connect_signals(self):
-        """连接信号槽"""
+        """连接控件动作,命令变化与自动保存信号,动态工具按钮按注册名分发."""
         self.connect_btn.clicked.connect(self.toggle_serial_connection)
         self.remote_toggle_btn.clicked.connect(self.toggle_remote_control)
         self.remote_mode_combo.currentTextChanged.connect(self.update_remote_host_options)
@@ -1011,6 +1063,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         ):
             source_checkbox.toggled.connect(self._refresh_output_source_display)
         self.show_sys_source_check.toggled.connect(self.system_level_button.setEnabled)
+        self.timestamp_check.toggled.connect(self._refresh_output_source_display)
+        self.show_send_source_check.toggled.connect(self._set_send_display_selected)
+        self.show_send_check.toggled.connect(self._sync_log_controls)
+        self.save_full_log_check.toggled.connect(self._apply_log_settings)
 
         for combo in (
             self.port_combo,
@@ -1036,6 +1092,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.show_send_check,
             self.replace_send_check,
             self.timestamp_check,
+            self.save_full_log_check,
         ):
             checkbox.toggled.connect(self.schedule_state_save)
 
@@ -1054,7 +1111,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.remote_group,
             self.receive_group,
             self.send_group,
-            self.other_group,
             self.template_group,
             self.tools_group,
         ):
@@ -1082,7 +1138,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.continuous_send_shortcut.setContext(Qt.WindowShortcut)
         self.continuous_send_shortcut.activated.connect(self.toggle_continuous_send)
 
-        # 连接工具按钮（动态连接, 基于工具名映射到方法）
+        # 连接工具按钮(动态连接, 基于工具名映射到方法)
         tool_method_map = {
             "number_conversion_dialog": self.open_bit_calculator,
             "bin_hex_converter": self.open_bin_hex_converter,
@@ -1121,9 +1177,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._sync_port_combo_display()
 
     def get_selected_port_id(self):
+        """提取当前端口显示文本首个空格前的设备名称."""
         return self.port_combo.currentText().strip().split(" ")[0]
 
     def get_selected_port_node(self):
+        """返回当前端口显示描述,移除末尾重复的括号端口名."""
         text = self.port_combo.currentText().strip()
         port_id = self.get_selected_port_id()
         suffix = f" ({port_id})"
@@ -1132,12 +1190,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return text
 
     def refresh_remote_ports(self):
-        """远程端请求主控端扫描串口并同步基本设置"""
+        """控制端请求设备端扫描串口并同步基本设置"""
         if not self.remote_thread or not self.remote_client_connected:
             self.output_manager.append_text("错误: 远程串口未连接", OutputSource.ERROR)
             return
-        self.output_manager.append_text("主控端刷新端口", OutputSource.SYSTEM)
-        self.remote_thread.send_serial_control("refresh_ports")
+        self.output_manager.append_text("设备端刷新端口", OutputSource.SYSTEM)
+        self.request_remote_device("refresh_ports")
 
     def get_local_ipv4_addresses(self):
         """获取本机可用于局域网连接的 IPv4 地址"""
@@ -1166,15 +1224,15 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return addresses
 
     def update_remote_host_options(self):
-        """根据远程模式刷新地址选项"""
+        """切换模式或展开下拉框时刷新本机地址候选,保留当前输入."""
         current_text = self.remote_host_input.currentText().strip()
-        self.remote_host_input.blockSignals(True)
+        previous = self.remote_host_input.blockSignals(True)
         self.remote_host_input.clear()
 
-        if self.remote_mode_combo.currentText() == "主控端":
+        if self.remote_mode_combo.currentIndex() == 0:
             for ip in self.get_local_ipv4_addresses():
                 self.remote_host_input.addItem(ip)
-            if current_text and self.remote_host_input.findText(current_text) >= 0:
+            if current_text:
                 self.remote_host_input.setCurrentText(current_text)
             elif self.remote_host_input.count() > 0:
                 self.remote_host_input.setCurrentIndex(0)
@@ -1186,7 +1244,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self.remote_host_input.addItem("127.0.0.1")
                 self.remote_host_input.setCurrentText("127.0.0.1")
 
-        self.remote_host_input.blockSignals(False)
+        self.remote_host_input.blockSignals(previous)
 
     def toggle_remote_token_visibility(self, checked):
         """显示或隐藏远程控制密码"""
@@ -1194,7 +1252,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def toggle_serial_connection(self):
         """打开/关闭串口连接"""
-        if self.is_remote_client_active():
+        if self.remote_mode == "client":
             self.toggle_remote_serial_connection()
             return
         if not self.is_connected:
@@ -1210,40 +1268,40 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.start_remote_control()
 
     def start_remote_control(self):
-        """启动远程控制服务端或客户端"""
-        mode_text = self.remote_mode_combo.currentText()
+        """启动设备端监听或控制端连接."""
+        if self.serial_operation_busy():
+            self.output_manager.append_text("固件任务期间不能切换远程角色", OutputSource.ERROR)
+            return
+        device_side = self.remote_mode_combo.currentIndex() == 0
         host = self.remote_host_input.currentText().strip()
         port = self.remote_port_spin.value()
         token = self.remote_token_input.text()
 
-        if mode_text == "主控端":
+        if device_side:
             self.remote_thread = RemoteControlServer("0.0.0.0", port, token)
             self.remote_mode = "server"
             selected_host = host or "本机全部地址"
             self.output_manager.append_text(
-                f"主控端将监听端口 {port}。远程端可连接地址: {selected_host}",
+                f"设备端将监听端口 {port}。控制端可连接地址: {selected_host}",
                 OutputSource.SYSTEM
             )
             if not self.is_connected or not self.serial_thread:
-                self.output_manager.append_text("提示: 主控端当前未打开串口, 远程端连接后需等待本机串口恢复", OutputSource.SYSTEM)
+                self.output_manager.append_text("提示: 设备端当前未打开串口, 控制端连接后需等待本机串口恢复", OutputSource.SYSTEM)
         else:
             if not host:
-                self.output_manager.append_text("错误: 请输入远程主控端地址", OutputSource.ERROR)
+                self.output_manager.append_text("错误: 请输入设备端地址", OutputSource.ERROR)
                 return
             if self.is_connected:
-                self.output_manager.append_text("错误: 远程端模式下请先关闭本地串口", OutputSource.ERROR)
+                self.output_manager.append_text("错误: 控制端模式下请先关闭本地串口", OutputSource.ERROR)
                 return
-            self.output_manager.append_text(f"正在连接远程主控端: {host}:{port}", OutputSource.SYSTEM)
+            self.output_manager.append_text(f"正在连接设备端: {host}:{port}", OutputSource.SYSTEM)
             self.remote_thread = RemoteControlClient(host, port, token)
             self.remote_mode = "client"
 
-        self.remote_thread.data_received.connect(self.on_remote_data_received)
         self.remote_thread.status_changed.connect(self.on_remote_status)
         self.remote_thread.error_occurred.connect(self.on_remote_error)
         self.remote_thread.connected_changed.connect(self.on_remote_connected_changed)
-        self.remote_thread.baudrate_requested.connect(self.on_remote_baudrate_requested)
-        self.remote_thread.serial_config_received.connect(self.on_remote_serial_config_received)
-        self.remote_thread.serial_control_requested.connect(self.on_remote_serial_control_requested)
+        self.remote_thread.message_received.connect(self.on_remote_message)
         self.remote_thread.start()
 
         self.remote_toggle_btn.setText("关闭远程控制")
@@ -1257,9 +1315,22 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def stop_remote_control(self):
         """停止远程控制"""
+        self._command_generation += 1
+        self._receive_decoder.reset()
+        self.remote_firmware_client.disconnect()
+        self.remote_firmware_host.disconnect()
+        self.remote_capabilities = {}
+        for task_id in list(self._remote_device_pending):
+            self._remote_device_timeout(task_id)
         was_client = self.remote_mode == "client"
+        if was_client:
+            self._remote_sequence_failed = True
+            if self.gui_cli_bridge:
+                self.gui_cli_bridge.remote_disconnected()
         if self.remote_thread:
-            self.remote_thread.stop()
+            if not self.remote_thread.stop():
+                self.output_manager.append_text("远程线程尚未退出，请稍后再关闭", OutputSource.ERROR)
+                return
             self.remote_thread = None
         if was_client:
             self.is_connected = False
@@ -1280,6 +1351,253 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._set_remote_status("远程: 未启用")
         self.output_manager.append_text("远程控制已关闭", OutputSource.SYSTEM)
 
+    def serial_operation_busy(self):
+        """所有本地及远程设备入口共享的占用门禁;上传也持有租约."""
+        return self._template_task is not None or self.firmware_download_running or self.remote_firmware_host.busy
+
+    def _send_remote_message(self, message):
+        """向已连接远程会话入队;连接未就绪抛 ConnectionError,不保证设备执行."""
+        if not self.remote_thread or not self.remote_client_connected:
+            raise ConnectionError("远程连接未就绪")
+        self.remote_thread._queue_message(message)
+
+    def _send_host_task_message(self, message, session):
+        """仅向任务所属且仍连接的 session 入队结果,防止迟到结果进入新会话."""
+        # 断线后排队的旧结果不能投递给新连接.
+        if self.remote_thread and self.remote_thread.session == session and self.remote_client_connected:
+            self.remote_thread._queue_message(message)
+
+    def _prepare_host_download(self):
+        """校验并快照设备端内置下载参数,停止设备端连续发送,不自动恢复该流程.
+
+        Returns:
+            tuple[dict, dict]: 设备端串口和协议配置;客户端不能指定设备端文件路径或参数.
+
+        Raises:
+            ValueError: 下载占用,工具未启用,使用外部工具或配置无效.
+        """
+        if self.firmware_download_running:
+            raise ValueError("串口已有下载任务")
+        if not self.config_manager.is_tool_enabled(FIRMWARE_TOOL_NAME):
+            raise ValueError("设备端固件下载未启用")
+        if self.config_manager.get_tool_path(FIRMWARE_TOOL_NAME):
+            raise ValueError("远程下载要求设备端使用内置下载核心；请在工具配置清空自定义路径")
+        downloader = get_firmware_downloader_class()
+        config = build_download_config(self.config_manager.get_firmware_downloader_params())
+        downloader.validate_config(config)
+        port = self._firmware_download_port_config()
+        if not port:
+            raise ValueError("设备端未选择有效串口")
+        # 预留串口前停止设备端自动发送, 后续不自动恢复.
+        if self.is_continuous_sending:
+            self.stop_continuous_sending()
+        return port, config
+
+    def _acquire_download_serial(self):
+        """暂停调试读取并等待句柄关闭;仅在释放成功后才允许下载器打开串口."""
+        restore = None
+        if self.is_connected and self.serial_thread:
+            port = self._firmware_download_port_config()
+            restore = dict(port=port["port"], baudrate=str(port["baudrate"]),
+                           databits=str(port["bytesize"]),
+                           parity={"N": "None", "E": "Even", "O": "Odd", "M": "Mark"}[port["parity"]],
+                           stopbits=str(port["stopbits"]).removesuffix(".0"))
+        if self.serial_thread and not self.close_serial(stop_continuous=False, internal=True):
+            raise RuntimeError("调试串口线程未退出；未启动下载")
+        return restore
+
+    def _release_download_serial(self, restore):
+        """只恢复此前打开的调试串口与参数,不恢复设备端连续发送,不发送设备命令."""
+        if restore:
+            self.apply_serial_config_to_basic_settings(restore)
+            if not self.open_serial(internal=True):
+                raise RuntimeError("原调试串口未能重新打开")
+        self.send_remote_serial_config()
+
+    def _remote_download_progress(self, current, total, message):
+        """把上传字节或下载包进度同步到 CLI,进度框和日志;完成前最多显示 99%."""
+        self.firmware_progress.emit(current, total, message)
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.progress(current, total, message)
+        if self._download_progress_dialog:
+            self._download_progress_dialog.setLabelText(message)
+            self._download_progress_dialog.setValue(min(99, int(current * 100 / max(total, 1))))
+        # 进度另有结构化订阅事件;这里仅保留 GUI 日志,避免控制台重复显示.
+        self._firmware_download_log("INFO", f"{message} ({current}/{total})", publish=False)
+
+    def _show_download_progress(self):
+        """创建带取消入口的非模态进度框,由实际完成回调关闭."""
+        dialog = QProgressDialog("准备固件下载", "取消", 0, 100, self)
+        dialog.setWindowTitle("固件下载")
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(self.cancel_firmware_download)
+        dialog.show()
+        self._download_progress_dialog = dialog
+
+    def on_remote_message(self, message):
+        """处理能力协商,固件状态和设备操作回执;旧会话的排队信号直接丢弃."""
+        if not self.remote_thread or message.get("_session") != self.remote_thread.session:
+            return
+        kind = message.get("type")
+        if kind == "serial_data":
+            if self.remote_mode == "client":
+                try:
+                    self.on_data_received(base64.b64decode(message.get("data", ""), validate=True))
+                except (ValueError, TypeError):
+                    self.output_manager.append_text("远程串口数据编码无效", OutputSource.ERROR)
+            else:
+                self.remote_thread.send_error("发送必须使用带请求 ID 的 device_request")
+        elif kind == "serial_config" and self.remote_mode == "client":
+            if isinstance(message.get("config"), dict):
+                self.apply_remote_serial_config(message["config"])
+        elif kind == "capabilities" and self.remote_mode == "client":
+            self.remote_capabilities = message
+        elif kind == "firmware":
+            if self.remote_mode == "server":
+                self.remote_firmware_host.handle(message)
+            elif self.remote_mode == "client":
+                self.remote_firmware_client.handle(message)
+        elif kind == "device_request" and self.remote_mode == "server":
+            self._execute_remote_device(message)
+        elif kind == "device_result" and self.remote_mode == "client":
+            if isinstance(message.get("id"), str) and message["id"] in self._remote_device_pending:
+                pending = self._remote_device_pending.pop(message["id"])
+                success = message.get("success") is True
+                self._remote_sequence_failed |= not success
+                self.output_manager.append_text(message.get("message", ""),
+                                                OutputSource.SYSTEM if success else OutputSource.ERROR)
+                if pending:
+                    pending(success)
+
+    def request_remote_device(self, action, config=None, callback=None):
+        """提交带唯一 ID 的设备端设备操作,十秒无回执按未知处理.
+
+        Args:
+            action (str): write/baudrate/comport/configure/open/close/refresh_ports.
+            config (dict | None): 对应动作参数,默认 None 发送空字典.
+            callback (Callable | None): callback(success: bool),收到终态或超时后
+                调用;默认 None.同步拒绝时仅返回 False,不调用该回调.
+
+        Returns:
+            bool: 是否已排队,不是设备执行结果;真正结果通过 ID 回执关联.
+        """
+        if not self.is_remote_client_active() or not self.remote_capabilities.get("device_results"):
+            self._remote_sequence_failed = True
+            self.output_manager.append_text("远程未连接或设备端不支持设备操作回执，请更新两端源码", OutputSource.ERROR)
+            return False
+        task_id = uuid.uuid4().hex
+        if self.serial_operation_busy() and action != "refresh_ports":
+            self.output_manager.append_text("固件任务占用串口", OutputSource.ERROR)
+            return False
+        self._remote_device_pending[task_id] = callback
+        self._send_remote_message(dict(type="device_request", id=task_id, action=action, config=config or {}))
+        QTimer.singleShot(10000, lambda: self._remote_device_timeout(task_id))
+        return True
+
+    def _remote_device_timeout(self, task_id):
+        """移除未确认请求并标记命令链失败,按结果未知通知回调,不重发."""
+        if task_id in self._remote_device_pending:
+            callback = self._remote_device_pending.pop(task_id)
+            self._remote_sequence_failed = True
+            self.output_manager.append_text("远程操作结果未知：未收到设备端回执；未自动重试", OutputSource.ERROR)
+            if callback:
+                callback(False)
+
+    def schedule_command_next(self, delay, callback, on_failure=None):
+        """等待当前远程请求完成后延时调度下一步,失败时停止当前命令链.
+
+        Args:
+            delay (int): 回执通过后等待的毫秒数.
+            callback (Callable): 无参数的下一步函数.
+            on_failure (Callable | None): 当前代命令失败时的无参数回调,默认 None.
+
+        捕获命令代号;停止或断线使旧代回调失效,失效回调不再调用下一步.
+        """
+        generation = self._command_generation
+        def ready():
+            """仅为当前代命令轮询待确认请求,全部通过后安排下一步."""
+            if generation != self._command_generation:
+                return
+            if self._remote_device_pending:
+                QTimer.singleShot(20, ready)
+            elif self._remote_sequence_failed:
+                self.stop_continuous_sending()
+                if on_failure:
+                    on_failure()
+            else:
+                QTimer.singleShot(delay, lambda: callback() if generation == self._command_generation else None)
+        ready()
+
+    def _execute_remote_device(self, message):
+        """执行设备端设备白名单,每个请求帧尝试一次并回传关联结果.
+
+        Args:
+            message (dict): 已由网络层关联 _session 的 device_request,包含
+                id,action,config.ID 必须为 32 位小写十六进制.
+
+        上传/下载和设备端连续发送期间拒绝冲突操作,不保存已完成请求历史.
+        write 只确认串口完整写入,comport 只更新选择,不热切换已打开句柄.
+        """
+        task_id = message.get("id")
+        if not isinstance(task_id, str) or not re.fullmatch(r"[a-f0-9]{32}", task_id):
+            return
+        success = False
+        try:
+            action = message.get("action")
+            config = message.get("config", {})
+            if not isinstance(config, dict):
+                raise ValueError("参数必须为对象")
+            if self.serial_operation_busy() and action != "refresh_ports":
+                raise ValueError("固件任务占用串口，操作已拒绝")
+            if self.is_continuous_sending and action != "refresh_ports":
+                raise ValueError("设备端正在连续发送，请先在设备端停止")
+            if action == "write":
+                data = base64.b64decode(config.get("data", ""), validate=True)
+                if not data or len(data) > 65536:
+                    raise ValueError("发送长度必须为 1–65536 字节")
+                success = self._write_serial_data(data) == len(data)
+                if success:
+                    self.output_manager.reset_receive_timestamp()
+                result = "设备端串口已写入" if success else "设备端串口写入失败；设备结果未知，未重发"
+            elif action == "baudrate":
+                success = bool(self.update_baudrate(validate_baudrate(config.get("value")), notify_remote=False))
+                result = "设备端波特率已设置" if success else "设备端波特率设置失败"
+            elif action == "comport":
+                port = config.get("port")
+                if not isinstance(port, str) or not port.strip() or len(port) > 256 or any(c in port for c in "\r\n\0"):
+                    raise ValueError("串口名称无效")
+                success = bool(self.update_com_port(port))
+                result = "设备端 COM 选择已更新（已打开的连接不切换，重新打开后生效）" if success else "COM 选择失败"
+            elif action == "configure":
+                if self.serial_thread or self.is_connected:
+                    raise ValueError("修改完整串口参数前请先关闭设备端串口")
+                from core import gui_config
+                valid = validate_serial_config(config)
+                basic = {name: str(valid[name]) for name in ("port", "baudrate", "databits", "parity", "stopbits")}
+                basic["port"] = basic["port"].strip().split(" ")[0]
+                gui_config.apply(self, {"state": {"basic_settings": basic}})
+                success, result = True, "设备端串口参数已保存，打开串口后生效"
+            elif action == "open":
+                if self.serial_thread:
+                    raise ValueError("设备端串口已打开或正在关闭")
+                self.apply_serial_config_to_basic_settings(validate_serial_config(config))
+                success = bool(self.open_serial())
+                result = "设备端串口已打开" if success else "设备端串口打开失败"
+            elif action == "close":
+                success = bool(self.close_serial())
+                result = "设备端串口已关闭" if success else "设备端串口关闭失败"
+            elif action == "refresh_ports":
+                self.send_remote_serial_config(include_ports=True)
+                success, result = True, "设备端串口列表已刷新"
+            else:
+                raise ValueError("未实现的远程设备操作")
+        except Exception as exc:
+            result = str(exc)
+        reply = dict(type="device_result", id=task_id, success=success, message=result)
+        self._send_remote_message(reply)
+        self.send_remote_serial_config()
+
     def on_remote_status(self, message):
         """远程控制状态消息"""
         self._set_remote_status(f"远程: {message}")
@@ -1287,78 +1605,46 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def on_remote_error(self, message, fatal=False):
         """远程控制错误消息"""
-        self.output_manager.append_text(f"错误: {message}", OutputSource.ERROR)
+        message = f"错误: {message}"
+        record = self.output_manager.append_text(message, OutputSource.ERROR)
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.publish_state(message, error=True, remote=True, timestamp=record.timestamp)
         if fatal and self.remote_mode == "client" and self.remote_thread:
             self.stop_remote_control()
 
-    def on_remote_connected_changed(self, connected):
+    def on_remote_connected_changed(self, connected, session=None):
         """远程连接状态变更"""
+        if session is not None and (not self.remote_thread or self.remote_thread.session != session):
+            return
         self.remote_client_connected = connected
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.publish_state("远程已连接" if connected else "远程已断开", remote=True,
+                                              connected=connected)
+        if not connected:
+            self._command_generation += 1
+            self._receive_decoder.reset()
+            self.remote_capabilities = {}
+            self.remote_firmware_client.disconnect()
+            self.remote_firmware_host.disconnect()
+            for task_id in list(self._remote_device_pending):
+                self._remote_device_timeout(task_id)
         if self.remote_mode == "client":
             self.connect_btn.setEnabled(connected)
+            if connected:
+                self._remote_sequence_failed = False
             if not connected:
                 self.remote_serial_connected = False
                 self.update_connect_button_state(False)
             self.set_basic_group_remote_style(connected)
         elif self.remote_mode == "server" and connected:
+            task = self.remote_firmware_host.active
+            if task and task["session"] != self.remote_thread.session:
+                self.remote_firmware_host.disconnect()
+            self._send_remote_message(dict(type="capabilities", firmware_upload=1, device_results=1, serial_config=1))
             self.send_remote_serial_config()
         status = "已连接" if connected else ("监听中" if self.remote_mode == "server" else "未连接")
         self._set_remote_status(f"远程: {status}")
 
-    def on_remote_data_received(self, data):
-        """远程端收到主控端串口回包, 或主控端收到远程端发送数据"""
-        if self.remote_mode == "server":
-            sent_bytes = self._write_serial_data(data)
-            if sent_bytes > 0:
-                self.send_count += sent_bytes
-                self.update_statistics()
-                self.output_manager.reset_receive_timestamp()
-                if self.show_send_check.isChecked():
-                    self.output_manager.append_text(f"[远程发送 HEX]: {data.hex(' ').upper()}", OutputSource.SEND)
-            else:
-                self.output_manager.append_text("错误: 主控端本地串口未打开, 无法转发远程数据", OutputSource.ERROR)
-                if self.remote_thread and self.remote_client_connected:
-                    self.remote_thread.send_error("主控端本地串口未打开, 无法发送")
-        elif self.remote_mode == "client":
-            self.on_data_received(data)
-
-    def on_remote_baudrate_requested(self, baudrate):
-        """远程端请求主控端修改波特率"""
-        if self.remote_mode == "server":
-            self.update_baudrate(baudrate, notify_remote=False)
-
-    def on_remote_serial_control_requested(self, action, config):
-        """主控端处理远程打开/关闭本地串口请求"""
-        if self.remote_mode != "server":
-            return
-
-        if action == "open":
-            self.apply_serial_config_to_basic_settings(config)
-            self.output_manager.append_text("收到远程端打开串口请求", OutputSource.SYSTEM)
-            self.open_serial()
-            if self.is_connected and self.serial_thread:
-                self.remote_thread._queue_message({
-                    "type": "status",
-                    "message": "主控端打开串口"
-                })
-        elif action == "close":
-            self.output_manager.append_text("收到远程端关闭串口请求", OutputSource.SYSTEM)
-            if self.is_connected or self.serial_thread:
-                self.close_serial()
-            else:
-                self.send_remote_serial_config()
-                if self.remote_thread and self.remote_client_connected:
-                    self.remote_thread.send_error("主控端串口已处于关闭状态")
-        elif action == "refresh_ports":
-            self.output_manager.append_text("收到远程端刷新端口请求", OutputSource.SYSTEM)
-            self.refresh_ports()
-            self.send_remote_serial_config(include_ports=True)
-
-    def on_remote_serial_config_received(self, config):
-        """远程端应用主控端串口参数"""
-        if self.remote_mode != "client":
-            return
-        self.apply_remote_serial_config(config)
 
     def get_current_serial_config(self, include_ports=False):
         """获取当前基本设置中的串口参数"""
@@ -1371,7 +1657,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             "databits": self.data_bits_combo.currentText(),
             "parity": self.parity_combo.currentText(),
             "stopbits": self.stop_bits_combo.currentText(),
-            "connected": connected
+            "connected": connected,
+            "busy": self.serial_operation_busy(),
         }
         if include_ports:
             config["ports"] = [
@@ -1385,25 +1672,25 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return config
 
     def toggle_remote_serial_connection(self):
-        """远程端请求主控端打开或关闭本地串口"""
+        """控制端请求设备端打开或关闭本地串口"""
         if not self.remote_thread or not self.remote_client_connected:
             self.output_manager.append_text("错误: 远程串口未连接", OutputSource.ERROR)
             return
 
         if self.remote_serial_connected:
-            self.output_manager.append_text("主控端关闭串口", OutputSource.SYSTEM)
-            self.remote_thread.send_serial_control("close")
+            self.output_manager.append_text("设备端关闭串口", OutputSource.SYSTEM)
+            self.request_remote_device("close")
         else:
-            self.output_manager.append_text("主控端打开串口", OutputSource.SYSTEM)
-            self.remote_thread.send_serial_control("open", self.get_current_serial_config())
+            self.output_manager.append_text("设备端打开串口", OutputSource.SYSTEM)
+            self.request_remote_device("open", self.get_current_serial_config())
 
     def send_remote_serial_config(self, include_ports=False):
-        """主控端向远程端同步串口参数"""
+        """设备端向控制端同步串口参数"""
         if self.remote_mode == "server" and self.remote_thread and self.remote_client_connected:
             self.remote_thread.send_serial_config(self.get_current_serial_config(include_ports=include_ports))
 
     def apply_remote_serial_config(self, config):
-        """远程端显示主控端硬件串口参数"""
+        """控制端显示设备端硬件串口参数"""
         self.apply_remote_port_list(config)
         self.apply_serial_config_to_basic_settings(config)
         if self.remote_mode == "client":
@@ -1413,7 +1700,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.set_basic_group_remote_style(True)
 
     def apply_remote_port_list(self, config):
-        """远程端应用主控端扫描到的端口列表"""
+        """控制端应用设备端扫描到的端口列表"""
         ports = config.get("ports")
         if not isinstance(ports, list):
             return
@@ -1456,11 +1743,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
 
     def is_remote_client_active(self):
-        """远程端虚拟基本设置状态：只向主控端发送控制, 不操作本机串口"""
+        """控制端虚拟基本设置状态:只向设备端发送控制, 不操作本机串口"""
         return self.remote_mode == "client" and self.remote_thread is not None and self.remote_client_connected
 
     def can_send_serial_data(self):
         """当前后端是否允许发送串口数据"""
+        if self.serial_operation_busy():
+            return False
         if self.is_remote_client_active():
             return self.remote_serial_connected
         return self.is_connected and self.serial_thread is not None
@@ -1479,9 +1768,9 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.stop_bits_combo.setCurrentText(str(config.get("stopbits", "1")))
 
     def set_basic_group_remote_style(self, remote_active):
-        """远程端连接时标记基本设置来自主控端硬件"""
+        """控制端连接时标记基本设置来自设备端硬件"""
         if remote_active:
-            self.basic_group.setTitle("基本设置 (主控端信息)")
+            self.basic_group.setTitle("基本设置 (设备端信息)")
             self.basic_group.content_widget.setStyleSheet("""
                 #content_widget {
                     border: 1px solid #7aa7d9;
@@ -1489,7 +1778,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     background-color: #eef6ff;
                 }
             """)
-            self.basic_group.toggle_button.setToolTip("远程端模式：基本设置显示主控端硬件串口参数")
+            self.basic_group.toggle_button.setToolTip("控制端模式：基本设置显示设备端硬件串口参数")
         else:
             self.basic_group.setTitle("基本设置")
             self.basic_group.content_widget.setStyleSheet("""
@@ -1502,21 +1791,36 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.basic_group.toggle_button.setToolTip("")
 
     def _set_remote_status(self, text):
+        """更新窗口中的远程连接状态标签."""
         self.remote_status_label.setText(text)
 
-    def _write_serial_data(self, data):
-        """向当前连接后端写入原始字节"""
+    def _write_serial_data(self, data, callback=None):
+        """经当前本地或远程后端提交串口字节.
+
+        本地返回完整写入计数,失败返回 0;远程返回入队长度,最终结果仍须等待
+        device_result,callback 仅接收远程实际回执.不得仅根据远程返回值认定设备操作完成.
+        """
+        if self.serial_operation_busy():
+            return 0
         if self.remote_mode == "client":
             if self.remote_thread and self.remote_client_connected:
-                self.remote_thread.send_serial_data(data)
-                return len(data)
+                queued = self.request_remote_device("write", {"data": base64.b64encode(data).decode("ascii")}, callback)
+                if queued and self.gui_cli_bridge:
+                    self.gui_cli_bridge.transmit(data)
+                return len(data) if queued else 0  # 仅表示排队;命令链等待 device_result.
             return 0
         if self.serial_thread:
-            return self.serial_thread.write_data(data)
+            count = self.serial_thread.write_data(data)
+            if count == len(data) and self.gui_cli_bridge:
+                self.gui_cli_bridge.transmit(data)
+            return count
         return 0
 
-    def open_serial(self):
+    def open_serial(self, internal=False):
         """打开串口"""
+        if (self.serial_operation_busy() and not internal) or self.serial_thread:
+            self.output_manager.append_text("串口被占用或已打开", OutputSource.ERROR)
+            return False
         port_text = self.port_combo.currentText()
         port = port_text.split(' ')[0]
         if not port:
@@ -1530,21 +1834,17 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return
 
         try:
-            baudrate = int(self.baud_combo.currentText())
-            bytesize = int(self.data_bits_combo.currentText())
-
-            parity_map = {"None": serial.PARITY_NONE, "Even": serial.PARITY_EVEN,
-                         "Odd": serial.PARITY_ODD, "Mark": serial.PARITY_MARK}
-            parity = parity_map[self.parity_combo.currentText()]
-
-            stopbits_map = {"1": serial.STOPBITS_ONE, "1.5": serial.STOPBITS_ONE_POINT_FIVE,
-                           "2": serial.STOPBITS_TWO}
-            stopbits = stopbits_map[self.stop_bits_combo.currentText()]
-
-            self.serial_thread = SerialThread(port, baudrate, bytesize, parity, stopbits)
-            self.serial_thread.data_received.connect(self.on_data_received)
-            self.serial_thread.error_occurred.connect(self.on_serial_error)
+            self.serial_thread = SerialThread(**serial_kwargs(self.get_current_serial_config()))
+            opening_thread = self.serial_thread
+            self.serial_thread.data_received.connect(
+                lambda data: self.on_data_received(data) if self.serial_thread is opening_thread else None)
+            self.serial_thread.error_occurred.connect(
+                lambda message: self.on_serial_error(message) if self.serial_thread is opening_thread else None)
             self.serial_thread.start()
+
+            if not self.serial_thread.open_completed.wait(1.5) or not self.serial_thread.serial or not self.serial_thread.serial.is_open:
+                self.close_serial(stop_continuous=False, internal=True)
+                return False
 
             self.is_connected = True
             self.connect_btn.setText("关闭串口")
@@ -1554,8 +1854,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     color: white;
                 }}
             """)
-            self.output_manager.append_text("串口已打开", OutputSource.SYSTEM) 
+            self.output_manager.append_text("串口已打开", OutputSource.SYSTEM)
+            if self.gui_cli_bridge:
+                self.gui_cli_bridge.publish_state("串口已打开", connected=True)
             self.send_remote_serial_config()
+            return True
 
         except Exception as e:
             error_str = str(e)
@@ -1567,18 +1870,24 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 打开失败时也刷新一下串口列表
             self.refresh_ports()
 
-    def close_serial(self, stop_continuous=True):
+    def close_serial(self, stop_continuous=True, internal=False):
         """关闭串口"""
+        if self.serial_operation_busy() and not internal:
+            self.output_manager.append_text("固件任务占用串口，关闭操作已拒绝", OutputSource.ERROR)
+            return False
         # 如果正在连续发送, 停止它
         if stop_continuous and self.is_continuous_sending:
             self.stop_continuous_sending()
 
         if self.serial_thread:
-            self.serial_thread.stop()
+            if not self.serial_thread.stop():
+                self.output_manager.append_text("串口线程尚未退出，保留占用", OutputSource.ERROR)
+                return False
             self.serial_thread = None
 
         self.is_connected = False
         self.connect_btn.setText("打开串口")
+        self._receive_decoder.reset()
         self.connect_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.BLUE_BUTTON};
@@ -1586,10 +1895,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             }}
         """)
         self.output_manager.append_text("串口已关闭", OutputSource.SYSTEM)
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.publish_state("串口已关闭", connected=False)
         self.send_remote_serial_config()
+        return True
 
     def _firmware_download_port_config(self):
-        """读取下载所需的本地串口配置，优先保留当前连接的真实配置。"""
+        """读取下载所需的本地串口配置,优先保留当前连接的真实配置."""
         if self.serial_thread:
             return {
                 "port": self.serial_thread.port,
@@ -1603,48 +1915,41 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         port = port_text.split(" ")[0] if port_text else ""
         if not port:
             return None
-        parity_map = {
-            "None": serial.PARITY_NONE,
-            "Even": serial.PARITY_EVEN,
-            "Odd": serial.PARITY_ODD,
-            "Mark": serial.PARITY_MARK,
-        }
-        stopbits_map = {
-            "1": serial.STOPBITS_ONE,
-            "1.5": serial.STOPBITS_ONE_POINT_FIVE,
-            "2": serial.STOPBITS_TWO,
-        }
         try:
-            return {
-                "port": port,
-                "baudrate": int(self.baud_combo.currentText()),
-                "bytesize": int(self.data_bits_combo.currentText()),
-                "parity": parity_map.get(self.parity_combo.currentText(), serial.PARITY_NONE),
-                "stopbits": stopbits_map.get(self.stop_bits_combo.currentText(), serial.STOPBITS_ONE),
-            }
+            return serial_kwargs(self.get_current_serial_config())
         except ValueError:
             return None
 
-    def _firmware_download_log(self, level, message):
+    def _firmware_download_log(self, level, message, publish=True):
+        """为下载日志添加来源,并将内置/外部下载日志交给控制台订阅.
+
+        Args:
+            level (str): 下载器日志级别,错误独立归入 error 来源.
+            message (str): 下载器原始说明.
+            publish (bool): 是否发布订阅;结构化进度已有单独事件时为 False.
+        """
         level_name = str(level or "").upper()
-        if level_name == "ERROR":
-            self.output_manager.append_text(
-                f"FirmwareDownload: {message}", OutputSource.ERROR
-            )
-            return
+        self.firmware_log.emit(level_name, message)
+        text = f"FirmwareDownload: {message}"
         system_level = {
             "WARNING": "warning",
             "INFO": "info",
             "DEBUG": "debug",
         }.get(level_name, "normal")
+        if publish and self.gui_cli_bridge:
+            self.gui_cli_bridge.publish_state(text, error=level_name == "ERROR",
+                                              system_level=system_level, firmware=True)
+        if level_name == "ERROR":
+            self.output_manager.append_text(text, OutputSource.ERROR)
+            return
         self.output_manager.append_text(
-            f"FirmwareDownload: {message}",
+            text,
             OutputSource.SYSTEM,
             system_level=system_level,
         )
 
     def _forward_external_firmware_output(self, raw_text, default_level):
-        """解析外部下载器标准输出中的级别前缀，保持与内置模式一致。"""
+        """解析外部下载器标准输出中的级别前缀,保持与内置模式一致."""
         for raw_line in str(raw_text or "").splitlines():
             line = raw_line.strip()
             if not line:
@@ -1660,108 +1965,62 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 self._firmware_download_log(default_level, line)
 
     def _complete_firmware_download(self, success, message):
-        """统一收尾下载任务、恢复串口并继续命令序列。"""
+        """在工作线程释放串口后收尾;失败/未知终止命令链,恢复原调试状态不重烧."""
         if not self.firmware_download_running:
             return
-
-        self.firmware_download_running = False
         self.firmware_download_worker = None
         self.firmware_download_process = None
-        cancelled = self.firmware_download_cancelled
+        if self.firmware_download_cancelled and success:
+            success, message = False, "取消与完成回执交错，结果未知；请核对设备端日志"
         self.firmware_download_cancelled = False
-
-        if cancelled:
+        if self._download_progress_dialog:
+            self._download_progress_dialog.close()
+            self._download_progress_dialog.deleteLater()
+            self._download_progress_dialog = None
+        try:
+            self._release_download_serial(self._firmware_download_restore_serial)
+        except Exception as exc:
             success = False
-            message = "下载被用户中断"
-
-        self._firmware_download_log("SUCCESS" if success else "ERROR", message)
-        if self._firmware_download_restore_serial:
-            self._firmware_download_log("INFO", "正在恢复串口连接")
-            self.open_serial()
-            if not self.is_connected:
-                success = False
-                self._firmware_download_log("ERROR", "恢复串口连接失败")
-            else:
-                self._firmware_download_log("INFO", "已恢复串口连接")
+            message += f"；恢复调试串口失败: {exc}"
         self._firmware_download_restore_serial = False
-
-        completion_callback = self._firmware_download_completion
+        self.firmware_download_running = False
+        self._last_firmware_result = (success, message)
+        self.send_remote_serial_config()
+        if not success:
+            self._remote_sequence_failed = True
+        self._firmware_download_log("SUCCESS" if success else "ERROR", message)
+        callback = self._firmware_download_completion
         self._firmware_download_completion = None
-        if completion_callback:
-            completion_callback(success)
+        if callback:
+            callback(success)
 
     def _start_builtin_firmware_download(self, firmware_path, port_config, download_config):
-        worker = FirmwareDownloadWorker(
-            firmware_path,
-            port_config,
-            download_config,
-            self,
-        )
+        """持有线程引用直至 QThread.finished;不能按业务信号提前恢复串口."""
+        worker = FirmwareDownloadWorker(firmware_path, port_config, download_config, self)
         self.firmware_download_worker = worker
         worker.log_signal.connect(self._firmware_download_log)
-        worker.progress_signal.connect(
-            lambda current, total, text: self._firmware_download_log(
-                "INFO", f"{text} ({current}/{total})"
-            )
-        )
-        worker.finished_signal.connect(self._complete_firmware_download)
+        worker.progress_signal.connect(self._remote_download_progress)
+        worker.finished.connect(lambda: self._complete_firmware_download(*worker.result))
+        worker.finished.connect(worker.deleteLater)
         worker.start()
 
     def _build_external_firmware_arguments(self, firmware_path, port_config, params):
-        """构造外部下载工具的自动下载参数，字段与内置下载器保持一致。"""
-        parity_map = {
-            serial.PARITY_NONE: "N", serial.PARITY_EVEN: "E", serial.PARITY_ODD: "O",
-            serial.PARITY_MARK: "M", serial.PARITY_SPACE: "S",
-        }
-        stopbits_map = {
-            serial.STOPBITS_ONE: "1", serial.STOPBITS_ONE_POINT_FIVE: "1.5",
-            serial.STOPBITS_TWO: "2",
-        }
-        args = [
-            "--auto-start", "--exit-on-complete", "--file", firmware_path,
-            "--port", str(port_config["port"]),
-            "--baudrate", str(port_config["baudrate"]),
-            "--bytesize", str(port_config["bytesize"]),
-            "--parity", parity_map.get(port_config["parity"], "N"),
-            "--stopbits", stopbits_map.get(port_config["stopbits"], "1"),
-            "--packet-size", str(params["packet_size"]),
-            "--start-command", str(params["start_command"]),
-        ]
-        if params.get("add_packet_crc"):
-            args.extend(["--add-packet-crc", "--packet-crc-type", str(params["packet_crc_type"])])
-        for prefix, cli_prefix, supports_crc in (
-            ("start_ack", "start-ack", False),
-            ("packet_ack", "packet-ack", True),
-            ("last_packet_ack", "last-packet-ack", True),
-        ):
-            if not params.get(f"wait_{prefix}"):
-                continue
-            args.extend([
-                f"--wait-{cli_prefix}",
-                f"--{cli_prefix}-timeout", str(params[f"{prefix}_timeout"]),
-                f"--{cli_prefix}-check-mode", str(params[f"{prefix}_check_mode"]),
-            ])
-            if params.get(f"{prefix}_check_length"):
-                args.extend([
-                    f"--{cli_prefix}-check-length",
-                    f"--{cli_prefix}-expected-length", str(params[f"{prefix}_expected_length"]),
-                ])
-            if params.get(f"{prefix}_check_data"):
-                args.extend([
-                    f"--{cli_prefix}-check-data",
-                    f"--{cli_prefix}-expected-data", str(params[f"{prefix}_expected_data"]),
-                    f"--{cli_prefix}-data-format", str(params[f"{prefix}_data_format"]),
-                ])
-            if supports_crc and params.get(f"{prefix}_check_crc"):
-                args.extend([
-                    f"--{cli_prefix}-check-crc",
-                    f"--{cli_prefix}-crc-type", str(params[f"{prefix}_crc_type"]),
-                ])
-        if params.get("send_end_string"):
-            args.extend(["--send-end-string", "--end-string", str(params["end_string"])])
-        return args
+        """复用 CLI 和 GUI 共用的外部下载器参数生成规则."""
+        from core.firmware_download import build_external_firmware_arguments
+        return build_external_firmware_arguments(firmware_path, port_config, params)
 
     def _start_external_firmware_download(self, custom_path, firmware_path, port_config, params):
+        """按现有参数启动本机外部下载进程,输出接入窗口日志.
+
+        Args:
+            custom_path (str): 本机外部下载器脚本或 EXE 路径.
+            firmware_path (str): 本机 BIN 路径.
+            port_config (dict): 本机串口参数快照.
+            params (dict): 工具配置中的平铺下载与 ACK 字段.
+
+        外部程序退出码不足以证明设备完成,进程结束按未知处理;该路径不用于
+        远程设备端固件任务,调用方已先释放调试串口.
+        """
         process = QProcess(self)
         self.firmware_download_process = process
         arguments = self._build_external_firmware_arguments(
@@ -1788,78 +2047,95 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             )
         )
         process.errorOccurred.connect(
-            lambda _error: self._complete_firmware_download(False, "外部固件下载工具无法启动")
+            lambda error: self._complete_firmware_download(False, "外部固件下载工具无法启动")
+            if error == QProcess.FailedToStart else self._firmware_download_log("ERROR", "外部下载器异常，等待进程释放串口")
         )
         process.finished.connect(
             lambda exit_code, _status: self._complete_firmware_download(
-                exit_code == 0,
-                "下载成功" if exit_code == 0 else f"外部固件下载工具退出码: {exit_code}",
+                False,
+                f"结果未知：外部下载器退出码 {exit_code}，无法核实其完成确认语义",
             )
         )
         process.start()
 
-    def start_firmware_download_command(self, parameter, completion_callback=None):
-        """启动 FirmwareDownload 特殊指令，并在结束后调用 completion_callback(success)。"""
-        if self.firmware_download_running:
-            self._firmware_download_log("ERROR", "已有固件下载任务正在运行")
-            if completion_callback:
-                completion_callback(False)
-            return False
-        if self.is_remote_client_active():
-            self._firmware_download_log("ERROR", "远程客户端模式暂不支持本地固件下载")
-            if completion_callback:
-                completion_callback(False)
-            return False
-        if not self.config_manager.is_tool_enabled(FIRMWARE_TOOL_NAME):
-            self._firmware_download_log("ERROR", "固件下载工具未启用")
-            if completion_callback:
-                completion_callback(False)
-            return False
-        if not self.config_manager.is_tool_available(FIRMWARE_TOOL_NAME):
-            self._firmware_download_log("ERROR", "固件下载工具未找到或未打包")
-            if completion_callback:
-                completion_callback(False)
-            return False
+    def start_firmware_download_command(self, parameter, completion_callback=None, *,
+                                        port_settings=None, download_params=None, show_progress=True):
+        """按钮,特殊命令及 CLI 共用的固件下载入口.
 
-        params = self.config_manager.get_firmware_downloader_params()
-        firmware_path, error = resolve_firmware_path(parameter, params)
-        if error:
-            self._firmware_download_log("ERROR", error)
-            if completion_callback:
-                completion_callback(False)
+        Args:
+            parameter (str): 执行 UI 所在电脑的 BIN 路径;为空时使用本机工具默认文件.
+            completion_callback (Callable | None): callback(success: bool),启动被拒绝
+                或任务收尾后调用,默认 None;结果含恢复调试连接是否成功.
+            port_settings (dict | None): 下载窗口本次选择的应用格式串口参数,仅本机使用.
+            download_params (dict | None): 下载窗口本次选择的平铺协议参数,仅本机使用.
+            show_progress (bool): 是否创建独立进度框;完整下载窗口自行显示进度.
+
+        Returns:
+            bool: 是否已启动本次任务;不是下载完成结果.远程路径要求能力协商,
+                只上传客户端文件,由设备端使用自己的串口和协议配置.
+
+        已有任务不会被本次拒绝调用清理;失败说明同步保存到 _last_firmware_result.
+        """
+        started = False
+        try:
+            if self.serial_operation_busy():
+                raise ValueError("已有固件任务占用串口")
+            if not self.config_manager.is_tool_enabled(FIRMWARE_TOOL_NAME):
+                raise ValueError("固件下载工具未启用")
+            params = (self.config_manager.get_firmware_downloader_params()
+                      if download_params is None else download_params)
+            path, error = resolve_firmware_path(parameter, params)
+            if error:
+                raise ValueError(error)
+            if not path.lower().endswith(".bin") or not 0 < os.path.getsize(path) <= 64 * 1024 * 1024:
+                raise ValueError("请选择 1 字节至 64 MiB 的 BIN 文件")
+            remote = self.remote_mode == "client"
+            if remote:
+                if port_settings is not None or download_params is not None:
+                    raise ValueError("远程下载使用设备端串口和协议配置")
+                if self._remote_device_pending:
+                    raise ValueError("请等待上一条设备端操作回执后再下载")
+                if not self.is_remote_client_active() or not self.remote_capabilities.get("firmware_upload"):
+                    raise ValueError("远程未连接或设备端不支持 BIN 上传；请更新两端源码")
+            else:
+                port = (self._firmware_download_port_config() if port_settings is None
+                        else serial_kwargs(validate_serial_config(port_settings)))
+                if not port:
+                    raise ValueError("未选择有效串口")
+                config = build_download_config(params)
+                get_firmware_downloader_class().validate_config(config)
+            self.firmware_download_running = True
+            started = True
+            self.firmware_download_cancelled = False
+            self._firmware_download_completion = completion_callback
+            self._firmware_download_restore_serial = False
+            if show_progress:
+                self._show_download_progress()
+            if remote:
+                self.remote_firmware_client.start(path)
+            else:
+                self._firmware_download_restore_serial = self._acquire_download_serial()
+                custom_path = self.config_manager.get_tool_path(FIRMWARE_TOOL_NAME)
+                if custom_path:
+                    self._start_external_firmware_download(custom_path, path, port, params)
+                else:
+                    self._start_builtin_firmware_download(path, port, config)
+            return True
+        except Exception as exc:
+            # 只结算本次创建的任务; 不影响已占用串口的其它任务.
+            if started:
+                self._complete_firmware_download(False, str(exc))
+            else:
+                self._firmware_download_log("ERROR", str(exc))
+                self._last_firmware_result = (False, str(exc))
+                if completion_callback:
+                    completion_callback(False)
             return False
-        port_config = self._firmware_download_port_config()
-        if not port_config:
-            self._firmware_download_log("ERROR", "未选择有效串口")
-            if completion_callback:
-                completion_callback(False)
-            return False
-
-        self.firmware_download_running = True
-        self.firmware_download_cancelled = False
-        self._firmware_download_last_progress = -1
-        self._firmware_download_completion = completion_callback
-        self._firmware_download_restore_serial = bool(self.is_connected and self.serial_thread)
-        self._firmware_download_log("NORMAL", f"开始下载固件: {firmware_path}")
-        self._firmware_download_log("INFO", f"准备下载 {firmware_path}")
-
-        if self._firmware_download_restore_serial:
-            self._firmware_download_log("INFO", f"正在释放串口 {port_config['port']}")
-            self.close_serial(stop_continuous=False)
-
-        custom_path = self.config_manager.get_tool_path(FIRMWARE_TOOL_NAME)
-        launch = lambda: (
-            self._start_external_firmware_download(custom_path, firmware_path, port_config, params)
-            if custom_path and os.path.isfile(custom_path)
-            else self._start_builtin_firmware_download(
-                firmware_path, port_config, build_download_config(params)
-            )
-        )
-        QTimer.singleShot(150 if self._firmware_download_restore_serial else 0, launch)
-        return True
 
     def cancel_firmware_download(self):
-        """请求取消当前固件下载，完成回调仍会负责恢复串口。"""
+        """请求取消当前固件下载,完成回调仍会负责恢复串口."""
+        self.remote_firmware_host.cancel()
+        self.remote_firmware_client.cancel()
         if not self.firmware_download_running:
             return
         self.firmware_download_cancelled = True
@@ -1867,24 +2143,34 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         if self.firmware_download_worker:
             self.firmware_download_worker.cancel()
         if self.firmware_download_process:
-            self.firmware_download_process.terminate()
+            process = self.firmware_download_process
+            process.terminate()
+            QTimer.singleShot(1500, lambda: process.kill()
+                              if self.firmware_download_process is process and process.state() != QProcess.NotRunning else None)
 
     def on_data_received(self, data):
         """接收数据回调"""
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.receive(data)
         if self.remote_mode == "server" and self.remote_thread and self.remote_client_connected:
             self.remote_thread.send_serial_data(data)
+        self.receive_count += len(data)
+        self.update_statistics()
         try:
-            text = data.decode('utf-8')
-            self.receive_count += len(data)
-            self.update_statistics()
+            text = self._receive_decoder.decode(data)
+            if not text:
+                return
             self._process_response_validation_text(text)
             self.output_manager.append_text(text, OutputSource.RECEIVE)
         except UnicodeDecodeError:
+            self._receive_decoder.reset()
             self.output_manager.append_text(f"[非UTF-8数据: {data.hex()}]", OutputSource.ERROR)
 
     def on_serial_error(self, error_msg):
-        """串口错误回调"""
+        """显示串口错误,停止连续/循环发送并刷新端口列表."""
         self.output_manager.append_text(f"错误: {error_msg}", OutputSource.ERROR)
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.publish_state(error_msg, error=True, connected=False)
         
         # 串口错误时停止连续发送
         if self.is_continuous_sending:
@@ -1903,13 +2189,38 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
     def open_config_dialog(self):
         """打开配置对话框"""
         dialog = ConfigDialog(self.config_manager, self)
-        if dialog.exec_():
-            # 配置已保存, 可以执行一些刷新操作
-            self.output_manager.append_text("配置已更新", OutputSource.SYSTEM)
-            self.update_tools_state()
+        try:
+            if dialog.exec_():
+                self.output_manager.append_text("配置已更新", OutputSource.SYSTEM)
+                self.update_tools_state()
+        finally:
+            dialog.deleteLater()
+
+    def choose_work_config(self):
+        """选择工作 JSON;与 CLI 共用无设备操作的切换事务."""
+        from core import gui_config
+        timer_active, loading = self._state_save_timer.isActive(), self._loading_state
+        self._state_save_timer.stop()
+        self._loading_state = True
+        switched = False
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "切换工作 JSON", self.config_manager.config_file,
+                                                "JSON 配置 (*.json)")
+            self._loading_state = loading
+            if not path:
+                return
+            result = gui_config.switch_file(self, path)
+            switched = result['switched']
+            self.output_manager.append_text("工作 JSON: " + result['working_config_file'], OutputSource.SYSTEM)
+        except Exception as exc:
+            self.output_manager.append_text("切换工作 JSON 失败: " + str(exc), OutputSource.ERROR)
+        finally:
+            self._loading_state = loading
+            if not switched and timer_active:
+                self._state_save_timer.start()
 
     def open_help_dialog(self):
-        """打开帮助窗口, 并重新载入最新的 README 内容。"""
+        """打开帮助窗口, 并重新载入最新的 README 内容."""
         if self.help_dialog is None:
             self.help_dialog = HelpDialog(self)
         self.help_dialog.reload_content()
@@ -1942,11 +2253,41 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return True
 
     def get_system_level_filter(self, level):
-        """获取系统来源中指定日志级别的显示状态。"""
+        """获取系统来源中指定日志级别的显示状态."""
         return str(level).lower() in self.system_level_selection
 
+    def get_log_capture_filter(self, source, level):
+        """日志配置决定收录;发送快捷入口以或逻辑覆盖,不改基础选择."""
+        if self.log_settings["retain_all"]:
+            return True
+        if source == OutputSource.SEND and self.show_send_check.isChecked():
+            return True
+        return self.log_settings["sources"][source.value] and (
+            source != OutputSource.SYSTEM or self.log_settings["system_levels"][level])
+
+    def _set_send_display_selected(self, checked):
+        """仅用户/加载基础选择时更新;联动显示更新会阻断此信号."""
+        self._send_display_selected = checked
+
+    def _sync_log_controls(self, _checked=None):
+        """呈现或逻辑后的状态;不把联动选中值写回基础选择或快照."""
+        if self._loading_state:
+            return
+        self._render_log_controls()
+        self._refresh_output_source_display()
+
+    def _render_log_controls(self):
+        """临时发送联动只改变有效显示状态,保留用户基础选择."""
+        shortcut = self.show_send_check.isChecked()
+        checkbox = self.show_send_source_check
+        previous = checkbox.blockSignals(True)
+        checkbox.setChecked(self._send_display_selected or shortcut)
+        checkbox.setEnabled(not shortcut)
+        checkbox.setToolTip("由发送设置中的“显示发送字符串”开启；关闭后恢复原选择" if shortcut else "")
+        checkbox.blockSignals(previous)
+
     def _show_system_level_dialog(self):
-        """以可持续勾选的对话框编辑系统日志级别。"""
+        """以可持续勾选的对话框编辑系统日志级别."""
         dialog = SystemLogLevelDialog(self.system_level_selection, self)
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -1956,11 +2297,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.schedule_state_save()
 
     def _update_system_level_button_text(self):
+        """按当前选择的系统日志级别更新筛选按钮文字."""
         selected_count = len(self.system_level_selection)
         self.system_level_button.setText(f"选择级别 ({selected_count}/4)")
 
     def _refresh_output_source_display(self, _checked=None):
-        """输出来源只影响显示，不删除已记录的数据。"""
+        """输出来源只影响显示,不删除已记录的数据."""
         if not hasattr(self, "output_manager"):
             return
         self.output_manager.refresh_display()
@@ -1968,14 +2310,10 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def get_ending_chars(self):
         """获取结尾标识符"""
-        ending = self.ending_combo.currentText()
-        if ending == "None":
-            return b""
-        else:
-            return ending.encode('utf-8').decode('unicode_escape').encode('utf-8')
+        return get_ending_bytes(self.ending_combo.currentText())
 
     def open_context_find(self):
-        """根据当前焦点打开接收区或发送区的独立查找栏。"""
+        """根据当前焦点打开接收区或发送区的独立查找栏."""
         focus = QApplication.focusWidget()
         if focus is self.receive_browser or (
             focus is not None and self.receive_browser.isAncestorOf(focus)
@@ -1995,6 +2333,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.receive_find_bar.show_and_focus(selected)
 
     def _search_receive_text(self, query, options, _scope="全部"):
+        """根据查找条件重建接收区匹配列表,报告无效表达式并刷新结果."""
         self.receive_find_matches = []
         self.receive_find_index = -1
         try:
@@ -2011,6 +2350,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._render_receive_find()
 
     def _render_receive_find(self):
+        """更新接收区查找计数,当前匹配高亮及可见位置."""
         selections = []
         for index, (start, end) in enumerate(self.receive_find_matches):
             selection = QTextEdit.ExtraSelection()
@@ -2035,6 +2375,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.receive_browser.ensureCursorVisible()
 
     def _navigate_receive_find(self, direction):
+        """按 direction 前后循环切换接收区当前匹配并刷新显示."""
         if not self.receive_find_matches:
             return
         self.receive_find_index = (
@@ -2043,15 +2384,18 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._render_receive_find()
 
     def _clear_receive_find(self):
+        """清空接收区匹配和选中状态,移除查找高亮."""
         self.receive_find_matches = []
         self.receive_find_index = -1
         self.receive_browser.setExtraSelections([])
 
     def _refresh_receive_find_if_visible(self):
+        """仅在接收区查找栏可见时按当前条件重新查找."""
         if self.receive_find_bar.isVisible():
             self.receive_find_bar._emit_search()
 
     def _send_find_rows(self, scopes):
+        """根据模块筛选范围确定发送区查找所覆盖的行号."""
         if not scopes or scopes == "全部":
             return range(self.command_table.rowCount())
         if isinstance(scopes, str):
@@ -2062,6 +2406,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return sorted(rows)
 
     def _search_send_commands(self, query, options, scopes="全部"):
+        """按范围搜索命令和注释,刷新匹配数量及高亮,不主动滚动表格."""
         self.send_find_matches = []
         self.send_find_index = -1
         self._clear_send_find_highlight()
@@ -2091,12 +2436,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.send_find_bar.set_result(0, 0, str(exc))
             return
 
-        # 搜索条件或命令内容变化时只刷新匹配数量, 不主动滚动表格。
-        # 跳转和高亮仅由回车、Shift+回车或查找栏上下按钮触发。
+        # 搜索条件或命令内容变化时只刷新匹配数量, 不主动滚动表格.
+        # 跳转和高亮仅由回车,Shift+回车或查找栏上下按钮触发.
         self._apply_all_send_find_highlights()
         self.send_find_bar.set_result(0, len(self.send_find_matches))
 
     def _render_send_find(self):
+        """显示发送区当前匹配,将对应行滚动到可见位置并保留查找栏焦点."""
         total = len(self.send_find_matches)
         current = self.send_find_index + 1 if total else 0
         self.send_find_bar.set_result(current, total)
@@ -2124,6 +2470,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             )
 
     def _apply_send_find_highlight(self, row, field, start, end):
+        """在指定行的命令或注释字段中突出 start/end 对应的当前匹配."""
         if not self.send_find_matches or self.send_find_index < 0:
             return
         if self.send_find_matches[self.send_find_index] != (row, field, start, end):
@@ -2140,6 +2487,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         )
 
     def _apply_all_send_find_highlights(self, active_match=None):
+        """为所有发送区匹配设置高亮,另标记可选的当前匹配."""
         self._clear_send_find_highlight()
         command_matches = {}
         comment_matches = {}
@@ -2168,6 +2516,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             command_edit.set_comment_search_matches(matches, active_comment)
 
     def _navigate_send_find(self, direction):
+        """按 direction 循环切换发送区匹配并定位对应行."""
         if not self.send_find_matches:
             return
         if self.send_find_index < 0:
@@ -2179,11 +2528,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._render_send_find()
 
     def _clear_send_find(self):
+        """清空发送区匹配和当前索引,移除查找高亮."""
         self._clear_send_find_highlight()
         self.send_find_matches = []
         self.send_find_index = -1
 
     def _clear_send_find_highlight(self):
+        """移除各命令输入框及注释中的发送区查找高亮."""
         for row in range(self.command_table.rowCount()):
             command_edit = self.command_table.cellWidget(row, 1)
             if command_edit:
@@ -2193,6 +2544,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.send_find_highlight_row = None
 
     def _on_command_table_changed(self, row_index):
+        """命令行变化后刷新相关模块,替换指示和查找结果."""
         if self.send_find_bar.isVisible():
             self.send_find_bar._emit_search()
         if 0 <= row_index < self.command_table.rowCount():
@@ -2204,9 +2556,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.update_replacement_mode_ui()
 
     def toggle_replacement_mode(self):
+        """切换替换发送复选框的启用状态."""
+        if not self.replace_send_check.isEnabled():
+            return
         self.replace_send_check.toggle()
 
     def edit_global_replacement_rule(self):
+        """编辑全局替换规则,接受后更新显示并安排保存."""
         dialog = ReplacementRuleDialog(
             self.global_replacement_rule,
             title="发送编辑区全局替换规则",
@@ -2223,6 +2579,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.schedule_state_save()
 
     def _effective_replacement_rule(self, row_index):
+        """优先返回指定行的独立替换规则,否则返回全局规则."""
         if row_index is not None:
             row_rule = self.command_table.get_replacement_rule(row_index)
             if row_rule:
@@ -2230,20 +2587,22 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         return self.global_replacement_rule
 
     def _is_replaceable_command(self, command, row_index):
+        """判断当前命令是否能按有效规则替换,特殊命令不作为普通文本替换."""
         if not self.replace_send_check.isChecked():
             return False
-        cmd_type_str, _param = UIUtils.parse_special_command(command)
+        cmd_type_str, _param = command_parts(command)
         if cmd_type_str and any(ct.value == cmd_type_str for ct in SpecialCommandType):
             return False
         try:
             return can_replace(
-                UIUtils.unescape_text(command),
+                unescape_text(command),
                 self._effective_replacement_rule(row_index),
             )
         except ValueError:
             return False
 
     def update_replacement_mode_ui(self):
+        """同步替换发送开关,按钮和各行可替换指示."""
         if not hasattr(self, "command_table"):
             return
         for row in range(self.command_table.rowCount()):
@@ -2254,6 +2613,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._update_continuous_button_style()
 
     def _update_continuous_button_style(self):
+        """按连续发送及替换模式更新连续发送按钮样式."""
         if not hasattr(self, "continuous_btn"):
             return
         if self.is_continuous_sending:
@@ -2265,9 +2625,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self._apply_button_color(self.continuous_btn, color)
 
     def _replace_outgoing_command(self, command, row_index):
+        """返回准备发送时替换后的文本,不注册响应校验."""
         return self._prepare_outgoing_command(command, row_index)[0]
 
     def _prepare_outgoing_command(self, command, row_index):
+        """返回 (替换后的文本, 可选响应校验配置);规则异常时记录错误并保留原命令."""
         if not self.replace_send_check.isChecked():
             return command, None
         rule = self._effective_replacement_rule(row_index)
@@ -2314,12 +2676,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return command, None
 
     def _effective_response_color_policy(self, loop_policy):
-        """循环策略只作用于已开启循环的连续发送。"""
+        """循环策略只作用于已开启循环的连续发送."""
         if self.is_continuous_sending and self.loop_send_check.isChecked():
             return loop_policy
         return "latest"
 
     def _register_response_validation(self, validation, row_index, start_offset):
+        """从接收流 start_offset 登记一次响应校验,弱引用关联行控件并启动超时检查."""
         if not validation:
             return
         edit = None
@@ -2343,18 +2706,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.response_validation_timer.start()
 
     def _process_response_validation_text(self, text):
+        """将新增接收文本交给流式校验器,并处理其中已完成的校验结果."""
         for result in self.response_validation_manager.feed(text):
             self._handle_response_validation_result(result)
         if not self.response_validation_manager.pending:
             self.response_validation_timer.stop()
 
     def _expire_response_validations(self):
+        """处理到期的响应校验;没有待确认项目时停止轮询计时器."""
         for result in self.response_validation_manager.expire():
             self._handle_response_validation_result(result)
         if not self.response_validation_manager.pending:
             self.response_validation_timer.stop()
 
     def _handle_response_validation_result(self, result):
+        """更新校验统计和行状态;失败时按配置显示诊断并决定是否停止连续发送."""
         self.validation_complete_count += 1
         if result.passed:
             self.validation_pass_count += 1
@@ -2421,24 +2787,46 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             ending = self.get_ending_chars()
             full_command = command.encode('utf-8') + ending
             validation_start_offset = self.response_validation_manager.end_offset
+            remote = self.is_remote_client_active()
 
             # 发送数据
-            sent_bytes = self._write_serial_data(full_command)
+            if remote and response_validation:
+                edit = self.command_table.cellWidget(row_index, 1) if row_index is not None else None
+                edit_ref = weakref.ref(edit) if edit is not None else None
+                edit_text = edit.text() if edit is not None else None
+                validation_queue = self.response_validation_manager.pending
+                def confirmed(success):
+                    # clear() 会替换列表;复位后不能由迟到回执重新登记旧校验.
+                    if not success or self.response_validation_manager.pending is not validation_queue:
+                        return
+                    current = edit_ref() if edit_ref else None
+                    current_row = None
+                    try:
+                        if (current is not None and current.text() == edit_text
+                                and self.command_table.cellWidget(current.row_index, 1) is current):
+                            current_row = current.row_index
+                    except RuntimeError:
+                        pass  # 原控件已删除,仍可校验/计数,但不能给新行染色.
+                    self._register_response_validation(response_validation, current_row,
+                        self.response_validation_manager.end_offset)
+                sent_bytes = self._write_serial_data(full_command, confirmed)
+            else:
+                sent_bytes = self._write_serial_data(full_command)
             if sent_bytes > 0:
-                self._register_response_validation(
-                    response_validation,
-                    row_index,
-                    validation_start_offset,
-                )
+                if not remote:
+                    self._register_response_validation(
+                        response_validation,
+                        row_index,
+                        validation_start_offset,
+                    )
                 self.send_count += sent_bytes
                 self.update_statistics()
 
                 # 重置接收时间戳标志
                 self.output_manager.reset_receive_timestamp()
 
-                # 显示发送的字符串
-                if self.show_send_check.isChecked():
-                    self.output_manager.append_text(command, OutputSource.SEND)
+                # 收录规则统一由日志配置决定,显示开关不拦截事件.
+                self.output_manager.append_text(command, OutputSource.SEND)
                 
                 return True
             else:
@@ -2462,10 +2850,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def on_send_clicked(self, row):
         """发送按钮点击事件"""
+        if not self.is_continuous_sending and not self._remote_device_pending:
+            self._remote_sequence_failed = False
+            self._command_generation += 1
         enable, command, comment = self.command_table.get_row_data(row)
         if command is not None:  # 允许空字符串, 只要行数据存在
             # 检查是否为特殊指令
-            cmd_type_str, param = UIUtils.parse_special_command(command)
+            cmd_type_str, param = command_parts(command)
             if cmd_type_str:
                 # 尝试匹配枚举类型
                 command_type = None
@@ -2480,7 +2871,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     return  # 特殊指令执行后返回
 
             # 普通命令或未知特殊指令, 处理转义后发送
-            unescaped_command = UIUtils.unescape_text(command)
+            unescaped_command = unescape_text(command)
             self.send_command(unescaped_command, row)
 
     def send_raw_data(self, data):
@@ -2494,37 +2885,40 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.send_count += sent_bytes
             self.update_statistics()
             self.output_manager.reset_receive_timestamp()
-            if self.show_send_check.isChecked():
-                self.output_manager.append_text(f"[HEX]: {data.hex(' ').upper()}", OutputSource.SEND)
+            self.output_manager.append_text(f"[HEX]: {data.hex(' ').upper()}", OutputSource.SEND)
             return True
         return False
 
     def update_baudrate(self, baudrate, notify_remote=True):
-        """更新波特率 (供特殊指令使用) """
+        """设置当前后端波特率;远程返回值是排队状态,最终状态由设备端回执报告."""
+        try:
+            baudrate = validate_baudrate(baudrate)
+        except ValueError as exc:
+            self.output_manager.append_text(str(exc), OutputSource.ERROR)
+            return False
+        if self.serial_operation_busy():
+            return False
+        if self.remote_mode == "client" and notify_remote:
+            return self.request_remote_device("baudrate", {"value": baudrate})
+        if self.serial_thread and not self.serial_thread.set_baudrate(baudrate):
+            return False
         self.baud_combo.setCurrentText(str(baudrate))
         self.save_state()
-        if self.remote_mode == "client" and notify_remote:
-            if self.remote_thread and self.remote_client_connected:
-                self.remote_thread.send_baudrate(baudrate)
-                self.output_manager.append_text(f"已请求远程主控端调整波特率至: {baudrate}", OutputSource.SYSTEM)
-            else:
-                self.output_manager.append_text("调整波特率失败: 远程串口未连接", OutputSource.ERROR)
-            return
-        if self.is_connected and self.serial_thread:
-            # 动态调整波特率, 无需关闭串口
-            self.output_manager.append_text(f"正在调整波特率至: {baudrate}", OutputSource.SYSTEM)
-            if self.serial_thread.set_baudrate(baudrate):
-                self.output_manager.append_text(output_rules.baudrate_updated(baudrate), OutputSource.SYSTEM)
-                self.send_remote_serial_config()
-            else:
-                self.output_manager.append_text(f"调整波特率失败", OutputSource.ERROR)
+        self.output_manager.append_text(output_rules.baudrate_updated(baudrate), OutputSource.SYSTEM)
+        self.send_remote_serial_config()
+        return True
 
     def update_com_port(self, port):
         """更新 COM 口 (供特殊指令和 CLI 配置复用) """
+        if self.serial_operation_busy():
+            return False
         port_id = port.strip().split(" ")[0]
         if not port_id:
             self.output_manager.append_text("错误: COM口不能为空", OutputSource.ERROR)
             return False
+
+        if self.remote_mode == "client":
+            return self.request_remote_device("comport", {"port": port_id})
 
         matched = False
         for index in range(self.port_combo.count()):
@@ -2543,31 +2937,25 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def set_ending(self, ending_text):
         """设置结尾标识符 (供特殊指令使用) """
-        # 映射常见的缩写或直接匹配
-        mapping = {
-            "none": "None",
-            "rn": r"\r\n",
-            "r": r"\r",
-            "n": r"\n"
-        }
-        target = mapping.get(ending_text.lower(), ending_text)
+        target = normalize_ending_text(ending_text)
         index = self.ending_combo.findText(target)
         if index >= 0:
             self.ending_combo.setCurrentIndex(index)
             self.output_manager.append_text(output_rules.ending_set(target), OutputSource.SYSTEM)
-            return
+            return True
 
         for i in range(self.ending_combo.count()):
             item_text = self.ending_combo.itemText(i)
             if item_text == target or item_text.replace(r"\r", "\r").replace(r"\n", "\n") == target:
                 self.ending_combo.setCurrentIndex(i)
                 self.output_manager.append_text(output_rules.ending_set(item_text), OutputSource.SYSTEM)
-                return
+                return True
 
         self.output_manager.append_text(f"错误: 不支持的结尾标识符: {ending_text}", OutputSource.ERROR)
+        return False
 
     def trigger_send_mode(self, module_name):
-        """触发指定模块的连续发送 (供特殊指令使用) """
+        """刷新并选择模块,以单次非循环模式启动;已有流程先停止,再延时重启."""
         module_name = module_name.strip()
         # 刷新模块列表以确保最新
         self.refresh_modules()
@@ -2583,8 +2971,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             if not self.is_continuous_sending:
                 self.start_continuous_send()
             else:
-                # 如果已经在连续发送, 我们需要停止当前的发送并重新开始。
-                # 注意：stop_continuous_sending 会清除 _force_no_loop, 所以我们需要在之后重新设置
+                # 如果已经在连续发送, 我们需要停止当前的发送并重新开始.
+                # 注意:stop_continuous_sending 会清除 _force_no_loop, 所以我们需要在之后重新设置
                 self.stop_continuous_sending()
                 self._force_no_loop = True
                 # 延迟一小段时间后重新启动, 确保之前的定时器都已清理
@@ -2611,6 +2999,8 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def start_continuous_send(self):
         """开始连续发送"""
+        if not self._remote_device_pending:
+            self._remote_sequence_failed = False
         if not self.can_send_serial_data():
             self.output_manager.append_text("错误: 请先打开串口", OutputSource.ERROR)
             return
@@ -2630,6 +3020,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def stop_continuous_sending(self):
         """停止连续发送"""
+        self._command_generation += 1
         self.is_continuous_sending = False
         if self.firmware_download_running:
             self.cancel_firmware_download()
@@ -2642,7 +3033,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.continuous_timer.stop()
 
     def send_continuous_commands(self):
-        """发送连续命令"""
+        """收集当前模块勾选的命令,启动由定时器,模块及下载回调驱动的发送链.
+
+        模块结构由 refresh_modules 独立解析;未勾选命令不加入当前发送队列.
+        远程设备步骤经 schedule_command_next 等待实际回执,失败停止后续步骤.
+        """
         if not self.is_continuous_sending:
             return
 
@@ -2659,7 +3054,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
             if enable:  # 只要勾选了就处理
                 # 检查是否为特殊指令
-                cmd_type_str, param = UIUtils.parse_special_command(command)
+                cmd_type_str, param = command_parts(command)
                 if cmd_type_str:
                     # 尝试匹配枚举类型
                     command_type = None
@@ -2673,20 +3068,21 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         commands_to_send.append((row, command, True, command_type, param))
                     else:
                         # 未知特殊指令, 按普通命令处理
-                        unescaped_command = UIUtils.unescape_text(command)
+                        unescaped_command = unescape_text(command)
                         commands_to_send.append((row, unescaped_command, False))
                 else:
                     # 普通命令
-                    unescaped_command = UIUtils.unescape_text(command)
+                    unescaped_command = unescape_text(command)
                     commands_to_send.append((row, unescaped_command, False))
             else:
-                # 未勾选, 但如果是 mode 指令, 虽然不发送, 但可能需要识别（目前逻辑是勾选才发送/执行）
+                # 未勾选, 但如果是 mode 指令, 虽然不发送, 但可能需要识别(目前逻辑是勾选才发送/执行)
                 # 这里保持原样, 未勾选的不加入发送队列
                 pass
 
         # 发送命令
         def send_next_command(index=0):
-            # 检查是否需要跳过到循环（StopContinuous:0 的效果）
+            """执行连续发送的一步,依据流程标志,延时及异步完成回调决定后续步骤."""
+            # 检查是否需要跳过到循环(StopContinuous:0 的效果)
             if getattr(self, '_skip_to_loop', False):
                 self._skip_to_loop = False  # 清除标志
                 # 立即跳转到循环检查逻辑
@@ -2696,7 +3092,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 # 检查是否开启了循环发送
                 if self.is_continuous_sending and self.loop_send_check.isChecked() and commands_to_send:
                     # 等待循环间隔后再次开始
-                    QTimer.singleShot(self.loop_interval_spin.value(), self.send_continuous_commands)
+                    self.schedule_command_next(self.loop_interval_spin.value(), self.send_continuous_commands)
                 else:
                     self.stop_continuous_sending()
                 return
@@ -2710,60 +3106,62 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     try:
                         delay_ms = float(param.strip())
                         self.output_manager.append_text(output_rules.continuous_delay(delay_ms), OutputSource.SYSTEM)
-                        QTimer.singleShot(int(delay_ms), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(int(delay_ms), lambda: send_next_command(index + 1))
                         return
                     except ValueError:
                         self.output_manager.append_text(output_rules.invalid_delay(param), OutputSource.ERROR)
                 elif command_type == SpecialCommandType.SENDHEX:
                     # 执行 SendHex 指令
                     if self.special_command_manager.execute(command_type, param, self):
-                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     else:
                         # 执行失败时记录错误并继续下一条, 不中断连续发送
                         self.output_manager.append_text(
                             output_rules.special_command_failed("SendHex", param),
                             OutputSource.ERROR,
                         )
-                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
-                elif command_type == SpecialCommandType.BAUDRATE:
+                elif command_type in (SpecialCommandType.BAUDRATE, SpecialCommandType.COMPORT):
                     # 执行 BaudRate 指令
                     if self.special_command_manager.execute(command_type, param, self):
                         # 波特率切换可能导致串口重启, 等待 500ms 确保稳定
-                        QTimer.singleShot(500, lambda: send_next_command(index + 1))
+                        self.schedule_command_next(500, lambda: send_next_command(index + 1))
                     else:
                         self.output_manager.append_text(
                             output_rules.special_command_failed("BaudRate", param),
                             OutputSource.ERROR,
                         )
-                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
                 elif command_type == SpecialCommandType.SETENDLOG:
                     # 执行 SetEndlog 指令
                     if self.special_command_manager.execute(command_type, param, self):
-                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     else:
                         self.output_manager.append_text(
                             output_rules.special_command_failed("SetEndlog", param),
                             OutputSource.ERROR,
                         )
-                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
                     return
                 elif command_type == SpecialCommandType.SENDMODE:
                     # 执行 SendMode 指令 - 发送指定模块的内容后继续当前模块
                     def on_sendmode_complete():
+                        """模块执行结束后按发送间隔调度外层下一条命令."""
                         # SendMode 执行完毕后, 继续当前模块的下一条命令
-                        QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                        self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
 
                     self.special_command_manager.execute_sendmode_inline(param.strip(), self, on_sendmode_complete)
                     return
                 elif command_type == SpecialCommandType.FIRMWAREDOWNLOAD:
                     def on_firmware_download_complete(success):
+                        """下载失败停止连续发送,成功时按间隔调度下一条命令."""
                         if not success:
                             self.stop_continuous_sending()
                             return
                         if self.is_continuous_sending:
-                            QTimer.singleShot(
+                            self.schedule_command_next(
                                 self.interval_spin.value(),
                                 lambda: send_next_command(index + 1),
                             )
@@ -2779,17 +3177,17 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 elif command_type == SpecialCommandType.STOPCONTINUOUS:
                     # 执行 StopContinuous 指令
                     self.special_command_manager.execute(command_type, param, self)
-                    # 如果设置了 _skip_to_loop 标志（模式0）, 立即触发循环检查
-                    # 否则（模式1）会调用 stop_continuous_sending, is_continuous_sending 会变为 False
+                    # 如果设置了 _skip_to_loop 标志(模式0), 立即触发循环检查
+                    # 否则(模式1)会调用 stop_continuous_sending, is_continuous_sending 会变为 False
                     send_next_command(len(commands_to_send))  # 跳转到结束, 触发循环检查
                     return
 
-                # 其他特殊指令（如mode）在发送时忽略
-                QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                # 其他特殊指令(如mode)在发送时忽略
+                self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
             else:
                 # 发送普通命令
                 if self.send_command(command, row):
-                    QTimer.singleShot(self.interval_spin.value(), lambda: send_next_command(index + 1))
+                    self.schedule_command_next(self.interval_spin.value(), lambda: send_next_command(index + 1))
                 else:
                     # 发送失败时停止连续发送
                     self.stop_continuous_sending()
@@ -2806,7 +3204,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.stop_continuous_sending()
 
     def refresh_modules(self, silent=False):
-        """刷新模块列表"""
+        """按 mode/modeend 建立行号到模块的映射,并恢复仍有效的下拉选择.
+
+        结构标记无论是否勾选都参与模块定义;勾选的 modeend 还会作为运行命令
+        加入该模块.这里只建立映射,是否执行某行由发送阶段的启用状态决定.
+        """
         # 保存当前选择
         jump_selection = self.jump_module_combo.currentText() if self.jump_module_combo.currentText() else "全部"
         send_selection = self.send_module_combo.currentText() if self.send_module_combo.currentText() else "全部"
@@ -2817,41 +3219,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.jump_module_combo.addItem("全部")
         self.send_module_combo.addItem("全部")
 
-        current_module = "默认"
-        self.modules[current_module] = []
-
-        for row in range(self.command_table.rowCount()):
-            enable, command, comment = self.command_table.get_row_data(row)
-
-            # 检查是否为特殊指令
-            cmd_type_str, param = UIUtils.parse_special_command(command)
-            
-            # 无论是否勾选, 都要处理 mode/modeend 控制逻辑, 以建立正确的模块结构
-            if cmd_type_str == "mode":
-                # mode指令：开始新模块
-                current_module = param.strip()
-                self.modules[current_module] = []
-                self.jump_module_combo.addItem(current_module)
-                self.send_module_combo.addItem(current_module)
-            elif cmd_type_str == "modeend":
-                # modeend指令：如果是勾选的, 先加入当前模块（这样才能在运行时执行）
-                if enable:
-                    self.modules[current_module].append(row)
-                    
-                # 结束当前模块, 切换回默认模块
-                # 注意：如果 param 是 '0' 才执行结束动作？不, 定义时只要是 modeend 就结束定义范围
-                # 但运行时只有 param 不为 -1 (或特定值) 才结束？
-                # 这里我们保持定义结束的语义
-                if current_module != "默认":
-                    current_module = "默认"
-                    # 如果默认模块还未初始化, 创建它
-                    if current_module not in self.modules:
-                        self.modules[current_module] = []
-            else:
-                # 其他指令（普通指令或非结构化特殊指令）：只有所属的模块正确
-                # 但只有勾选的才会被 execute_xxx 用到？不, refresh_modules 只是建立映射
-                # 实际发送时会检查 enable
-                self.modules[current_module].append(row)
+        from core.command_executor import build_module_index
+        modules, names = build_module_index(self.command_table.get_all_commands())
+        self.modules.update(modules)
+        self.jump_module_combo.addItems(names)
+        self.send_module_combo.addItems(names)
 
         # 恢复之前的选择(如果仍然存在)
         if jump_selection and self.jump_module_combo.findText(jump_selection) >= 0:
@@ -2891,8 +3263,128 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                         )
                     )
                 self.output_manager.append_text(f"数据已保存到: {filename}", OutputSource.SYSTEM)
-            except Exception as e:
+            except (OSError, UnicodeError) as e:
                 self.output_manager.append_text(f"错误: 保存文件失败: {str(e)}", OutputSource.ERROR)
+
+    def log_directory(self):
+        """返回两个配置入口共用的有效目录,空配置使用工作 JSON 旁的 logs."""
+        return self.log_settings["log_directory"] or os.path.join(
+            os.path.dirname(os.path.abspath(self.config_manager.config_file)), "logs")
+
+    def can_change_log_directory(self):
+        """保存关闭且旧批次已妥善结束时,两个目录入口才允许编辑."""
+        archive = self.output_manager.archive
+        return not self.save_full_log_check.isChecked() and not (
+            archive and (archive.busy or archive.pending or archive.error))
+
+    def _choose_log_directory(self):
+        """快捷选择目录并通过共用事务立即保存,取消或保存失败保留原设置."""
+        from core import gui_config
+        directory = QFileDialog.getExistingDirectory(self, "选择日志目录", self.log_directory())
+        if directory:
+            try:
+                gui_config.apply(self, {"state": {"log_settings": {"log_directory": directory}}})
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "日志目录未保存", str(exc))
+
+    def _apply_log_settings(self, _value=None):
+        """在初始化/配置事务结束后同步日志运行态,不在控件回滚中裁剪历史."""
+        if self._loading_state or self._closing_logs:
+            return
+        self._sync_log_controls()
+        self.output_manager.set_limit(self.log_settings["limit_mb"] * 1_000_000)
+        try:
+            self.output_manager.configure_archive(self.save_full_log_check.isChecked(), self.log_directory())
+        except (OSError, ValueError) as exc:
+            self._on_log_archive_failed(str(exc))
+            return
+        self._update_log_status()
+
+    def _update_log_status(self):
+        """由批次状态信号更新主界面,不轮询磁盘或内存."""
+        archive = self.output_manager.archive
+        available = self.can_change_log_directory()
+        self.log_directory_button.setEnabled(available)
+        hint = f"日志目录: {self.log_directory()}"
+        if archive:
+            hint += f"\n日志文件: {archive.path}"
+        if not available:
+            hint += "\n修改目录前请停止保存并等待尾部写完；失败时先另存未确认日志"
+        self.log_directory_button.setToolTip(hint)
+        if archive and archive.error:
+            text = archive.error
+        elif archive and archive.busy and not self.save_full_log_check.isChecked():
+            text = "正在保存尾部"
+        else:
+            text = ""
+        self.log_status_label.setText(text)
+        self.log_status_label.setVisible(bool(text))
+        self.log_status_label.setToolTip(archive.error or str(archive.path) if archive else "")
+
+    def _on_log_archive_failed(self, message):
+        """独立于日志来源筛选显示文件失败,停止后续归档但保留未确认批次."""
+        previous = self.save_full_log_check.blockSignals(True)
+        self.save_full_log_check.setChecked(False)
+        self.save_full_log_check.blockSignals(previous)
+        self.output_manager.archive_enabled = False
+        self._update_log_status()
+        self.log_status_label.setText(message)
+        self.log_status_label.setToolTip(message)
+        self.log_status_label.setVisible(True)
+        archive = self.output_manager.archive
+        self.recover_log_button.setVisible(archive is not None and bool(archive.error))
+        self.schedule_state_save()
+
+    def _recover_log_archive(self):
+        """用户显式另存未确认数据;原文件可能部分写入,不会自动拼接或重试."""
+        archive = self.output_manager.archive
+        if archive.busy:
+            QMessageBox.information(self, "日志保存", "正在结束写入批次，请稍后另存。")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "另存未确认日志到新文件", "recovered.log", "Log Files (*.log)")
+        if path:
+            self.recover_log_archive(path)
+
+    def log_archive_status(self):
+        """查询真实归档状态,不读取文件或触发配置保存."""
+        archive = self.output_manager.archive
+        return dict(scope="current-process", enabled=self.output_manager.archive_enabled,
+                    archive=archive.status() if archive else None)
+
+    def recover_log_archive(self, path, completed=None):
+        """GUI按钮和CLI共用显式恢复;回调只在写者finished后执行.
+
+        Args:
+            path (str): 用户显式指定的新文件路径,独占新建.
+            completed (callable | None): 实际写入结束后接收(success,message).
+        """
+        archive = self.output_manager.archive
+        if archive is not None and archive.busy:
+            raise ValueError("日志批次尚未结束，请稍后另存")
+        if archive is None or not archive.error:
+            raise ValueError("当前没有失败的未确认日志可另存")
+        if completed is not None:
+            def finished():
+                archive.idle.disconnect(finished)
+                completed(not bool(archive.error), archive.error or "未确认日志已另存完成")
+            archive.idle.connect(finished)
+        try:
+            archive.recover_to(path)
+        except (ValueError, OSError):
+            if completed is not None:
+                archive.idle.disconnect(finished)
+            raise
+        self.recover_log_button.setEnabled(False)
+        self.log_status_label.setText("正在另存未确认日志…")
+
+    def _on_log_archive_idle(self):
+        """处理写盘完成及等待中的窗口关闭;线程已经 finished 后才销毁窗口."""
+        archive = self.output_manager.archive
+        self.recover_log_button.setEnabled(True)
+        self.recover_log_button.setVisible(bool(archive.error))
+        self._update_log_status()
+        if self._closing_logs:
+            QTimer.singleShot(0, self.close)
 
     def clear_receive_data(self):
         """清空接收数据"""
@@ -2933,54 +3425,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         progress.setValue(0)
         return progress
 
-    def _count_importable_rows(self, filename):
-        """统计可导入的数据行数"""
-        count = 0
-        with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
-            reader = csv.reader(f)
-            for csv_row in reader:
-                if not csv_row or len(csv_row) == 0:
-                    continue
-                if csv_row[0].strip().startswith('//') or csv_row[0].strip().startswith('#'):
-                    continue
-                if len(csv_row) < 2:
-                    continue
-                enable_str = csv_row[0].strip().lower()
-                if enable_str not in ['true', 'false']:
-                    continue
-                count += 1
-        return count
-
-    def _should_process_progress(self, value, maximum):
-        """控制长任务进度刷新频率, 避免大文件逐行刷新阻塞界面。"""
-        if maximum <= 100:
-            return True
-        return value == maximum or value % 100 == 0
-
-    def _snapshot_template_state(self):
-        """保存导入前模板状态, 用于取消时回滚"""
-        return {
-            "commands": self.command_table.get_all_commands(),
-            "replacement_rules": self.command_table.get_replacement_rules(),
-            "jump_module": self.jump_module_combo.currentText(),
-            "send_module": self.send_module_combo.currentText(),
-        }
-
-    def _restore_template_state(self, snapshot):
-        """恢复模板状态"""
-        self.command_table.clear_all()
-        for row, (enable, command, comment) in enumerate(snapshot["commands"]):
-            self.command_table.add_command_row(enable, command, comment, row)
-        self.command_table.load_replacement_rules(snapshot.get("replacement_rules", {}))
-        self.refresh_modules(silent=True)
-
-        jump_module = snapshot.get("jump_module")
-        send_module = snapshot.get("send_module")
-        if jump_module and self.jump_module_combo.findText(jump_module) >= 0:
-            self.jump_module_combo.setCurrentText(jump_module)
-        if send_module and self.send_module_combo.findText(send_module) >= 0:
-            self.send_module_combo.setCurrentText(send_module)
-
     def _set_long_task_ui_busy(self, busy):
         """长任务期间禁用主界面交互, 避免可重入操作"""
         central_widget = self.centralWidget()
@@ -2998,7 +3442,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         """)
 
     def _bind_momentary_button_feedback(self, button, normal_color, pressed_color=Colors.RED_BUTTON, extra_styles=""):
-        """为瞬时按钮绑定按下变色、释放恢复"""
+        """为瞬时按钮绑定按下变色,释放恢复"""
         self._apply_button_color(button, normal_color, extra_styles)
         button.pressed.connect(lambda b=button, c=pressed_color, s=extra_styles: self._apply_button_color(b, c, s))
         button.released.connect(lambda b=button, c=normal_color, s=extra_styles: self._apply_button_color(b, c, s))
@@ -3008,101 +3452,262 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         target_color = running_color if running else normal_color
         self._apply_button_color(button, target_color, extra_styles)
 
-    def _safe_remove_file(self, file_path):
-        """安全删除文件, 不让清理异常覆盖主异常"""
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
+    def publish_file_event(self, event):
+        """记录执行端唯一文件结果并转发既有 GUI 订阅,显示过滤不改变事件."""
+        event = dict(event)
+        event.setdefault("file_event_id", uuid.uuid4().hex)
+        self.output_manager.append_text(event["message"], OutputSource(event["source"]),
+            system_level=event["system_level"], timestamp=event["timestamp"])
+        self.statusBar().showMessage(event["message"])
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.broadcast(event)
+        return event
 
-    def _process_progress(self, progress, value):
-        """更新进度并处理取消事件"""
-        progress.setValue(value)
-        QApplication.processEvents()
-        return progress.wasCanceled()
+    def start_template_operation(self, operation, path, completed=None, plain_text=False, owner=None):
+        """GUI 按钮与 CLI 共用无对话框模板入口,IO 在线程,控件分块只在 Qt 线程处理.
 
-    def import_template(self):
-        """导入模板"""
-        self._set_action_button_running(self.import_btn, True, Colors.GREEN_BUTTON)
+        Args:
+            operation: template-import 或 template-export.
+            path: 客户端已解析或文件对话框选择的绝对路径.
+            completed: 唯一终态回调,接收共同文件事件;发布后调用.
+            plain_text: 仅 GUI 明确选择的纯文本导入方式.
+            owner: 桥接当前请求对象,只有相同对象才允许复用其任务占用;GUI 按钮传 None.
+        """
+        path = template_path(path)
+        if (self.serial_operation_busy() or self.is_continuous_sending or self._remote_device_pending
+                or (self.gui_cli_bridge and self.gui_cli_bridge.active is not None
+                    and self.gui_cli_bridge.active is not owner)):
+            event = self.publish_file_event(output_rules.file_operation_event(operation, path, "failed", error="GUI 当前有任务运行"))
+            if completed:
+                completed(event)
+            return False
+        if operation not in ("template-import", "template-export"):
+            raise ValueError("未知模板操作")
+        task = dict(operation=operation, path=path, completed=completed, rows=[], cancelled=False,
+            old_loading=self._loading_state, old_dirty=self._state_dirty, plain_text=plain_text,
+            before_modules=copy.deepcopy(self.modules),
+            before_names=[self.jump_module_combo.itemText(index) for index in range(1, self.jump_module_combo.count())])
+        self._template_task = task
+        self._loading_state = True
+        self._state_save_timer.stop()
+        self._set_long_task_ui_busy(True)
+        task["progress"] = self._create_progress_dialog("正在处理模板...", 1000)
+        # 中央控件已禁用;非模态 setValue 不隐式 processEvents,避免取消重入提交.
+        task["progress"].setWindowModality(Qt.NonModal)
+        task["progress"].canceled.connect(self.cancel_template_operation)
+        self._snapshot_template_chunk()
+        return True
 
-        filename = ""
-        parsed_commands = []
-        try:
-            while True:
-                last_dir = self.config_manager.get_last_used_directory()
-                filename, _ = QFileDialog.getOpenFileName(
-                    self, "导入模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
+    def cancel_template_operation(self):
+        """只取消当前模板流程;配置原子提交开始后等待实际保存结果."""
+        task = self._template_task
+        if task and task.get("phase") != "save-config":
+            task["cancelled"] = True
+            if task.get("worker"):
+                task["worker"].requestInterruption()
 
-                if not filename:
-                    return
+    def _snapshot_template_chunk(self):
+        task = self._template_task
+        if task["cancelled"]:
+            self._finish_template("cancelled")
+            return
+        deadline = time.monotonic() + 0.008
+        while len(task["rows"]) < self.command_table.rowCount() and time.monotonic() < deadline:
+            task["rows"].append(self.command_table.get_row_data(len(task["rows"])))
+        if len(task["rows"]) < self.command_table.rowCount():
+            QTimer.singleShot(0, self._snapshot_template_chunk)
+            return
+        task["before_state"] = self.snapshot_state(commands=task["rows"])
+        task["before_config"] = self.config_manager.config
+        if task["operation"] == "template-import":
+            self._start_template_worker("read")
+        else:
+            self._start_template_worker("export", rows=task["rows"])
 
-                self.config_manager.set_last_used_directory(os.path.dirname(filename))
+    def _start_template_worker(self, phase, rows=None, manager=None):
+        task = self._template_task
+        task["phase"] = phase
+        if phase == "save-config":
+            task["progress"].setCancelButton(None)
+        worker = TemplateWorker(phase, task["path"], rows, manager, task["plain_text"], self)
+        task["worker"] = worker
+        worker.progress.connect(lambda value: self._template_progress(value, len(rows or [])))
+        worker.finished.connect(self._template_worker_finished)
+        worker.start()
 
-                with open(filename, 'r', encoding='utf-8-sig', newline='') as f:
-                    file_text = f.read()
+    def _template_progress(self, value, total):
+        task = self._template_task
+        if task:
+            task["progress"].setValue(min(999, 100 + int(800 * value / max(total, 1))))
+            if self.gui_cli_bridge:
+                self.gui_cli_bridge.template_progress(value, total)
 
-                try:
-                    parsed_commands = CommandRowsTextParser.parse_template_rows(file_text)
-                    break
-                except ValueError as parse_error:
-                    user_choice = self._show_template_format_error_dialog(filename, parse_error)
-                    if user_choice == "reselect":
-                        continue
-                    if user_choice != "plain_text":
-                        return
+    def _template_worker_finished(self):
+        task = self._template_task
+        worker = task.pop("worker")
+        error, result, phase = worker.error, worker.result, task["phase"]
+        worker.deleteLater()
+        if error:
+            if task.get("applied"):
+                task["error"] = error
+                self._apply_template_rows(task["rows"], restoring=True)
+            else:
+                self._finish_template("cancelled" if isinstance(error, InterruptedError) else "failed", error)
+            return
+        if phase == "save-config":
+            self.config_manager.config = result
+            self._state_dirty = False
+            self._finish_template("success")
+        elif task["cancelled"] and phase != "export":
+            self._finish_template("cancelled")
+        elif phase == "read":
+            task["new_rows"], task["new_modules"] = result
+            self._apply_template_rows(task["new_rows"])
+        else:
+            self._finish_template("success")
 
-                    try:
-                        parsed_commands = CommandRowsTextParser.parse_plain_text_rows(file_text)
-                    except ValueError as plain_text_error:
-                        QMessageBox.warning(self, "导入失败", str(plain_text_error))
-                        return
-                    break
-
-            total_rows = len(parsed_commands)
-            progress_maximum = max(total_rows, 1)
-            progress = self._create_progress_dialog("正在导入模板...", progress_maximum)
-            snapshot = self._snapshot_template_state()
-            self._set_long_task_ui_busy(True)
-
-            parsed_modules, parsed_module_names, parsed_messages = self._build_template_import_data(parsed_commands)
-
-            # 解析完成后再批量刷新 UI, 避免边读文件边频繁创建控件和重绘。
+    def _apply_template_rows(self, rows, restoring=False):
+        task = self._template_task
+        task["applying"] = rows
+        task["index"] = 0
+        task["restoring"] = restoring
+        if not task.get("applied"):
+            task["signals_blocked"] = self.command_table.blockSignals(True)
             self.command_table.setUpdatesEnabled(False)
-            self.command_table.clear_all()
-            self.modules.clear()
-            self.modules.update(parsed_modules)
-            self.jump_module_combo.clear()
-            self.send_module_combo.clear()
-            self.jump_module_combo.addItem("全部")
-            self.send_module_combo.addItem("全部")
-            for module_name in parsed_module_names:
-                self.jump_module_combo.addItem(module_name)
-                self.send_module_combo.addItem(module_name)
+            # 旧回执仍计数/诊断,但不能再给替换或回滚后的命令染色.
+            for pending in self.response_validation_manager.pending:
+                pending.row_widget_ref = None
+        task["applied"] = True
+        # 一次调整行结构,已有控件继续复用,空行在后续分块中填充;回滚走同一路径.
+        if self.command_table.rowCount() != len(rows):
+            self.command_table.setRowCount(len(rows))
+        self.command_table.clearSelection()
+        self.command_table.comments.clear()
+        self.command_table.replacement_rules.clear()
+        QTimer.singleShot(0, self._apply_template_chunk)
 
-            for row, (enable, command, comment) in enumerate(parsed_commands):
-                self.command_table.add_command_row(enable, command, comment, row)
-                if self._should_process_progress(row + 1, total_rows) and self._process_progress(progress, row + 1):
-                    self._restore_template_state(snapshot)
-                    self.output_manager.append_text("导入已取消", OutputSource.SYSTEM)
-                    return
+    def _apply_template_chunk(self):
+        task = self._template_task
+        if task["cancelled"] and not task["restoring"]:
+            self._apply_template_rows(task["rows"], restoring=True)
+            return
+        try:
+            deadline = time.monotonic() + 0.008
+            while task["index"] < len(task["applying"]) and time.monotonic() < deadline:
+                self.command_table.replace_command_row(task["index"], *task["applying"][task["index"]])
+                task["index"] += 1
+            self._template_progress(task["index"], len(task["applying"]))
+            if task["index"] < len(task["applying"]):
+                QTimer.singleShot(0, self._apply_template_chunk)
+                return
+            if task["cancelled"] and not task["restoring"]:
+                self._apply_template_rows(task["rows"], restoring=True)
+                return
+            self._begin_template_modules()
+        except Exception as exc:
+            if task["restoring"]:
+                self._finish_template("failed", exc)
+            else:
+                task["error"] = exc
+                self._apply_template_rows(task["rows"], restoring=True)
 
-            for message in parsed_messages:
-                self.output_manager.append_text(message, OutputSource.SYSTEM)
+    def _begin_template_modules(self):
+        task = self._template_task
+        modules, names = ((task["before_modules"], task["before_names"]) if task["restoring"] else task["new_modules"])
+        self.modules.clear()
+        self.modules.update(modules)
+        task["module_names"], task["module_index"] = names, 0
+        for combo in (self.jump_module_combo, self.send_module_combo):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("全部")
+        QTimer.singleShot(0, self._apply_template_modules_chunk)
 
-            progress.setValue(progress_maximum)
-            self.output_manager.append_text(f"模板已导入: {filename}", OutputSource.SYSTEM)
+    def _apply_template_modules_chunk(self):
+        task = self._template_task
+        try:
+            if task["cancelled"] and not task["restoring"]:
+                self._apply_template_rows(task["rows"], restoring=True)
+                return
+            deadline = time.monotonic() + 0.008
+            while task["module_index"] < len(task["module_names"]) and time.monotonic() < deadline:
+                name = task["module_names"][task["module_index"]]
+                self.jump_module_combo.addItem(name)
+                self.send_module_combo.addItem(name)
+                task["module_index"] += 1
+            if task["module_index"] < len(task["module_names"]):
+                QTimer.singleShot(0, self._apply_template_modules_chunk)
+                return
+            self.send_find_bar.set_scopes(self.modules.keys())
+            if task["cancelled"] and not task["restoring"]:
+                self._apply_template_rows(task["rows"], restoring=True)
+                return
+            if task["restoring"]:
+                before = task["before_state"]
+                self.command_table.load_replacement_rules(before["command_replacement_rules"], notify=False)
+                self.jump_module_combo.setCurrentText(before["send_settings"]["jump_module"])
+                self.send_module_combo.setCurrentText(before["send_settings"]["send_module"])
+                self._finish_template("failed" if task.get("error") else "cancelled", task.get("error"))
+                return
+            self.jump_module_combo.setCurrentText("全部")
+            self.send_module_combo.setCurrentText("全部")
+            candidate = copy.deepcopy(task["before_config"])
+            candidate["state"] = self.snapshot_state(commands=task["new_rows"])
+            manager = copy.copy(self.config_manager)
+            manager.config = candidate
+            self._start_template_worker("save-config", manager=manager)
+        except Exception as exc:
+            if task["restoring"]:
+                self._finish_template("failed", exc)
+            else:
+                task["error"] = exc
+                self._apply_template_rows(task["rows"], restoring=True)
 
-        except Exception as e:
-            self.output_manager.append_text(f"错误: 导入模板失败: {str(e)}", OutputSource.ERROR)
-        finally:
+    def _finish_template(self, outcome, error=None):
+        task = self._template_task
+        if task.get("applied"):
+            self.jump_module_combo.blockSignals(False)
+            self.send_module_combo.blockSignals(False)
+            self.command_table.blockSignals(task["signals_blocked"])
             self.command_table.setUpdatesEnabled(True)
             self.command_table.viewport().update()
-            self._set_long_task_ui_busy(False)
-            self._set_action_button_running(self.import_btn, False, Colors.GREEN_BUTTON)
+        self._loading_state = task["old_loading"]
+        if outcome != "success":
+            self._state_dirty = task["old_dirty"]
+        task["progress"].close()
+        task["progress"].deleteLater()
+        self._set_long_task_ui_busy(False)
+        self._template_task = None
+        count = len(task.get("new_rows", task["rows"])) if outcome == "success" else None
+        event = self.publish_file_event(output_rules.file_operation_event(task["operation"], task["path"], outcome, count, error))
+        if task["completed"]:
+            task["completed"](event)
+
+    def _remember_template_directory(self, filename):
+        """仅 GUI 非空选择更新共享目录,失败经既有错误输出提示."""
+        try:
+            self.config_manager.set_last_used_directory(os.path.dirname(filename))
+        except Exception as exc:
+            self.output_manager.append_text(f"错误: 保存模板目录失败: {exc}", OutputSource.ERROR)
+
+    def import_template(self):
+        """选择文件后调用共用异步模板接口,保留 GUI 明确选择纯文本的入口."""
+        filename, _ = QFileDialog.getOpenFileName(self, "导入模板",
+            self.config_manager.get_last_used_directory(), "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
+        if not filename:
+            return
+        self._remember_template_directory(filename)
+        def completed(event):
+            if event["outcome"] == "failed" and event.get("error") and "格式" in event["error"]:
+                choice = self._show_template_format_error_dialog(filename, event["error"])
+                if choice == "plain_text":
+                    self.start_template_operation("template-import", filename, plain_text=True)
+                elif choice == "reselect":
+                    self.import_template()
+        self.start_template_operation("template-import", filename, completed)
 
     def _show_template_format_error_dialog(self, filename, error):
-        """模板格式不匹配时, 让用户选择重新选文件或按纯文本导入。"""
+        """模板格式不匹配时, 让用户选择重新选文件或按纯文本导入."""
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Warning)
         message_box.setWindowTitle("模板格式不正确")
@@ -3125,86 +3730,13 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             return "reselect"
         return "cancel"
 
-    def _build_template_import_data(self, parsed_commands):
-        """根据命令行内容构建模块信息, 供模板导入和纯文本兜底导入复用。"""
-        current_module = "默认"
-        parsed_modules = OrderedDict([(current_module, [])])
-        parsed_module_names = []
-        parsed_messages = []
-
-        for row, (enable, command, comment) in enumerate(parsed_commands):
-            cmd_type_str, param = UIUtils.parse_special_command(command)
-            if cmd_type_str == 'mode':
-                current_module = param.strip()
-                parsed_modules[current_module] = []
-                parsed_module_names.append(current_module)
-                parsed_messages.append(f"已创建模块: '{current_module}'")
-            elif cmd_type_str == 'modeend':
-                if enable:
-                    parsed_modules[current_module].append(row)
-                if current_module != "默认":
-                    current_module = "默认"
-                    if current_module not in parsed_modules:
-                        parsed_modules[current_module] = []
-                    parsed_messages.append("模块定义已结束, 切换回默认模块")
-
-            if cmd_type_str not in ('mode', 'modeend') and not (enable is False and command == "" and comment):
-                parsed_modules[current_module].append(row)
-
-        return parsed_modules, parsed_module_names, parsed_messages
-
     def export_template(self):
-        """导出模板"""
-        self._set_action_button_running(self.export_btn, True, Colors.GREEN_BUTTON)
-
-        last_dir = self.config_manager.get_last_used_directory()
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "导出模板", last_dir, "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
-
-        if not filename:
-            self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
-            return
-
-        self.config_manager.set_last_used_directory(os.path.dirname(filename))
-
-        temp_path = None
-        try:
-            commands = self.command_table.get_all_commands()
-            progress = self._create_progress_dialog("正在导出模板...", len(commands))
-            self._set_long_task_ui_busy(True)
-
-            with tempfile.NamedTemporaryFile(
-                mode='w', encoding='utf-8', newline='', delete=False,
-                dir=os.path.dirname(filename) or None,
-                suffix='.tmp'
-            ) as temp_file:
-                temp_path = temp_file.name
-                writer = csv.writer(temp_file, quoting=csv.QUOTE_MINIMAL)
-                writer.writerow(["// 选择框,串口需要发送的数据,注释"])
-
-                for index, (enable, command, comment) in enumerate(commands, start=1):
-                    # CSV writer会自动处理引号和特殊字符, 无需手动转义
-                    # 只对不可见字符进行转义, 保持可读性
-                    escaped_command = UIUtils.escape_text(command)
-                    escaped_comment = UIUtils.escape_text(comment)
-                    writer.writerow([str(enable), escaped_command, escaped_comment])
-
-                    if self._should_process_progress(index, len(commands)) and self._process_progress(progress, index):
-                        temp_file.close()
-                        self._safe_remove_file(temp_path)
-                        self.output_manager.append_text("导出已取消", OutputSource.SYSTEM)
-                        return
-
-            os.replace(temp_path, filename)
-            progress.setValue(len(commands))
-            self.output_manager.append_text(f"模板已导出: {filename}", OutputSource.SYSTEM)
-
-        except Exception as e:
-            self._safe_remove_file(temp_path)
-            self.output_manager.append_text(f"错误: 导出模板失败: {str(e)}", OutputSource.ERROR)
-        finally:
-            self._set_long_task_ui_busy(False)
-            self._set_action_button_running(self.export_btn, False, Colors.GREEN_BUTTON)
+        """选择目标后调用与 CLI 相同的 GUI 异步原子导出接口."""
+        filename, _ = QFileDialog.getSaveFileName(self, "导出模板",
+            self.config_manager.get_last_used_directory(), "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)")
+        if filename:
+            self._remember_template_directory(filename)
+            self.start_template_operation("template-export", filename)
 
     def _jump_to_module_row(self):
         """跳转到所选模块的第一个命令行"""
@@ -3255,96 +3787,105 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
         self.output_manager.append_text(f"已跳转到第 {target_row + 1} 行。", OutputSource.SYSTEM)
 
     def schedule_state_save(self, *_args):
-        """标记状态已变化，并在用户停止操作后写入配置。"""
+        """标记状态已变化,并在用户停止操作后写入配置."""
         if self._loading_state:
             return
         self._state_dirty = True
         self._state_save_timer.start()
 
     def _flush_pending_state(self):
-        """保存待写状态；定时兜底可覆盖长时间连续编辑的场景。"""
-        if self._state_dirty:
+        """保存待写状态;定时兜底可覆盖长时间连续编辑的场景."""
+        if self._state_dirty and not self._loading_state:
             self.save_state()
+
+    def snapshot_state(self, commands=None):
+        """读取当前控件,命令表和选择状态,不保存文件,不触发设备操作."""
+        return OrderedDict([
+            ("basic_settings", {
+                "port": self.get_selected_port_id(),
+                "port_node": self.get_selected_port_node(),
+                "baudrate": self.baud_combo.currentText(),
+                "databits": self.data_bits_combo.currentText(),
+                "parity": self.parity_combo.currentText(),
+                "stopbits": self.stop_bits_combo.currentText()
+            }),
+            ("remote_settings", {
+                "mode": self.remote_mode_combo.currentData(),
+                "host": self.remote_host_input.currentText(),
+                "port": self.remote_port_spin.value(),
+                "token": self.remote_token_input.text()
+            }),
+            ("receive_settings", {
+                "show_timestamp": self.timestamp_check.isChecked(),
+                "display_sources": {
+                    "send": self._send_display_selected,
+                    "receive": self.show_recv_source_check.isChecked(),
+                    "system": self.show_sys_source_check.isChecked(),
+                    "error": self.show_err_source_check.isChecked()
+                },
+                "system_levels": {
+                    level: level in self.system_level_selection
+                    for level in ("normal", "warning", "info", "debug")
+                },
+                "save_sources": {
+                    source.value: source in self.save_source_selection
+                    for source in OutputSource
+                },
+                "save_system_levels": {
+                    level: level in self.save_system_level_selection
+                    for level in ("normal", "warning", "info", "debug")
+                }
+            }),
+            ("send_settings", {
+                "loop_send": self.loop_send_check.isChecked(),
+                "loop_interval": self.loop_interval_spin.value(),
+                "continuous_interval": self.interval_spin.value(),
+                "show_send": self.show_send_check.isChecked(),
+                "send_color": self.send_color_combo.currentText(),
+                "ending": self.ending_combo.currentText(),
+                "replace_send": self.replace_send_check.isChecked(),
+                "global_replacement_rule": self.global_replacement_rule,
+                "jump_module": self.jump_module_combo.currentText(),
+                "send_module": self.send_module_combo.currentText()
+            }),
+            ("log_settings", dict(copy.deepcopy(self.log_settings),
+                                  save_full_log=self.save_full_log_check.isChecked())),
+            ("ui_settings", {
+                "h_splitter_sizes": self.h_splitter.sizes()
+            }),
+            ("tool_settings", {
+                "left_group_expanded": {
+                    "basic": self.basic_group.isExpanded(),
+                    "remote": self.remote_group.isExpanded(),
+                    "receive": self.receive_group.isExpanded(),
+                    "send": self.send_group.isExpanded(),
+                    "template": self.template_group.isExpanded(),
+                    "tools": self.tools_group.isExpanded()
+                }
+            }),
+            ("commands", self.command_table.get_all_commands() if commands is None else commands),
+            ("command_replacement_rules", self.command_table.get_replacement_rules())
+        ])
 
     def save_state(self):
         """保存当前状态到配置文件"""
         try:
-            state = OrderedDict([
-                ("basic_settings", {
-                    "port": self.get_selected_port_id(),
-                    "port_node": self.get_selected_port_node(),
-                    "baudrate": self.baud_combo.currentText(),
-                    "databits": self.data_bits_combo.currentText(),
-                    "parity": self.parity_combo.currentText(),
-                    "stopbits": self.stop_bits_combo.currentText()
-                }),
-                ("remote_settings", {
-                    "mode": self.remote_mode_combo.currentText(),
-                    "host": self.remote_host_input.currentText(),
-                    "port": self.remote_port_spin.value(),
-                    "token": self.remote_token_input.text()
-                }),
-                ("receive_settings", {
-                    "display_sources": {
-                        "send": self.show_send_source_check.isChecked(),
-                        "receive": self.show_recv_source_check.isChecked(),
-                        "system": self.show_sys_source_check.isChecked(),
-                        "error": self.show_err_source_check.isChecked()
-                    },
-                    "system_levels": {
-                        level: level in self.system_level_selection
-                        for level in ("normal", "warning", "info", "debug")
-                    },
-                    "save_sources": {
-                        source.value: source in self.save_source_selection
-                        for source in OutputSource
-                    },
-                    "save_system_levels": {
-                        level: level in self.save_system_level_selection
-                        for level in ("normal", "warning", "info", "debug")
-                    }
-                }),
-                ("send_settings", {
-                    "loop_send": self.loop_send_check.isChecked(),
-                    "loop_interval": self.loop_interval_spin.value(),
-                    "continuous_interval": self.interval_spin.value(),
-                    "show_send": self.show_send_check.isChecked(),
-                    "send_color": self.send_color_combo.currentText(),
-                    "ending": self.ending_combo.currentText(),
-                    "replace_send": self.replace_send_check.isChecked(),
-                    "global_replacement_rule": self.global_replacement_rule,
-                    "jump_module": self.jump_module_combo.currentText(),
-                    "send_module": self.send_module_combo.currentText()
-                }),
-                ("other_settings", {
-                    "show_timestamp": self.timestamp_check.isChecked()
-                }),
-                ("ui_settings", {
-                    "h_splitter_sizes": self.h_splitter.sizes()
-                }),
-                ("tool_settings", {
-                    "left_group_expanded": {
-                        "basic": self.basic_group.isExpanded(),
-                        "remote": self.remote_group.isExpanded(),
-                        "receive": self.receive_group.isExpanded(),
-                        "send": self.send_group.isExpanded(),
-                        "other": self.other_group.isExpanded(),
-                        "template": self.template_group.isExpanded(),
-                        "tools": self.tools_group.isExpanded()
-                    }
-                }),
-                ("commands", self.command_table.get_all_commands()),
-                ("command_replacement_rules", self.command_table.get_replacement_rules())
-            ])
+            state = self.snapshot_state()
             self.config_manager.set("state", state)
             self._state_dirty = False
+            if not self._loading_state:
+                self.gui_cli_bridge.publish_log_settings(state)
             return True
         except Exception as e:
             print(f"保存状态失败: {e}")
             return False
 
     def load_state(self):
-        """从配置文件加载状态"""
+        """加载配置到控件,命令表和模块选择,按现有逻辑处理旧字段.
+
+        加载期间通过 _loading_state 抑制自动保存;模块刷新后恢复仍存在的
+        跳转/发送模块选择,不自动连接设备.
+        """
         try:
             state = self.config_manager.get("state") or self.config_manager.get("last_state")
             if not state:
@@ -3370,7 +3911,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
             # 2. 远程控制设置
             remote_settings = state.get("remote_settings", {})
-            self.remote_mode_combo.setCurrentText(remote_settings.get("mode", "主控端"))
+            mode = remote_settings.get("mode", self.remote_mode_combo.itemData(0))
+            mode_index = self.remote_mode_combo.findData(mode)
+            if mode_index < 0:
+                raise ValueError("远程角色配置无效，请检查 state.remote_settings.mode")
+            self.remote_mode_combo.setCurrentIndex(mode_index)
             self.update_remote_host_options()
             self.remote_host_input.setCurrentText(remote_settings.get("host", "127.0.0.1"))
             self.remote_port_spin.setValue(remote_settings.get("port", 8765))
@@ -3379,6 +3924,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             # 3. 接收设置
             receive_settings = state.get("receive_settings")
             if receive_settings:
+                self.timestamp_check.setChecked(receive_settings.get("show_timestamp", False))
                 display_sources = receive_settings.get("display_sources")
                 if display_sources is None:
                     display_sources = {
@@ -3442,9 +3988,11 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                     self.DEFAULT_GLOBAL_REPLACEMENT_RULE
                 )
             
-            # 5. 其他设置
-            other_settings = state.get("other_settings", {})
-            self.timestamp_check.setChecked(other_settings.get("show_timestamp", False))
+            # 5. 日志规则保存在运行态,配置窗口只编辑草稿.
+            log_settings = state.get("log_settings", {})
+            for key, default in self.log_settings.items():
+                self.log_settings[key] = copy.deepcopy(log_settings.get(key, default))
+            self.save_full_log_check.setChecked(log_settings.get("save_full_log", False))
 
             # 6. UI 设置
             ui_settings = state.get("ui_settings") or state.get("ui_state", {})
@@ -3459,7 +4007,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
                 "remote": False,
                 "receive": True,
                 "send": True,
-                "other": True,
                 "template": True,
                 "tools": tool_settings.get("tools_group_expanded", False)
             }
@@ -3469,13 +4016,12 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.remote_group.setExpanded(left_group_expanded.get("remote", False))
             self.receive_group.setExpanded(left_group_expanded.get("receive", True))
             self.send_group.setExpanded(left_group_expanded.get("send", True))
-            self.other_group.setExpanded(left_group_expanded.get("other", True))
             self.template_group.setExpanded(left_group_expanded.get("template", True))
             self.tools_group.setExpanded(left_group_expanded.get("tools", False))
 
             # 加载命令
             saved_commands = state.get("commands")
-            if saved_commands:
+            if saved_commands is not None:
                 self.command_table.blockSignals(True)
                 self.command_table.setUpdatesEnabled(False)
                 try:
@@ -3552,7 +4098,7 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.data_bits_combo.setCurrentText(self.config_manager.get("databits", "8"))
             self.parity_combo.setCurrentText(self.config_manager.get("parity", "None"))
             self.stop_bits_combo.setCurrentText(self.config_manager.get("stopbits", "1"))
-            self.remote_mode_combo.setCurrentText("主控端")
+            self.remote_mode_combo.setCurrentIndex(0)
             self.update_remote_host_options()
             self.remote_host_input.setCurrentText("127.0.0.1")
             self.remote_port_spin.setValue(8765)
@@ -3560,7 +4106,6 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
             self.remote_group.setExpanded(False)
             self.receive_group.setExpanded(True)
             self.send_group.setExpanded(True)
-            self.other_group.setExpanded(True)
             self.template_group.setExpanded(True)
             self.tools_group.setExpanded(False)
             
@@ -3593,7 +4138,37 @@ class SerialTool(QMainWindow, BaseWidgetMixin):
 
     def closeEvent(self, event):
         """对话框关闭事件"""
-        if self.remote_thread:
-            self.stop_remote_control()
+        if self.serial_operation_busy():
+            self.cancel_template_operation()
+            self.cancel_firmware_download()
+            self._firmware_download_log("INFO", "正在取消任务并释放资源，请结束后再次关闭窗口")
+            event.ignore()
+            return
+        if not self._closing_logs:
+            self.close_serial()
+            if self.remote_thread:
+                self.stop_remote_control()
+        self.output_manager.flush_pending_output()
+        self.output_manager.archive_enabled = False
+        archive = self.output_manager.archive
+        if archive:
+            archive.flush(force=True)
+            if archive.busy:
+                self._closing_logs = True
+                self.setEnabled(False)
+                self.log_status_label.setText("正在保存日志尾部，完成后关闭…")
+                self.log_status_label.setVisible(True)
+                event.ignore()
+                return
+            if archive.error and archive.unsaved_entries():
+                self._closing_logs = False
+                self.setEnabled(True)
+                answer = QMessageBox.warning(self, "日志尚未保存", "未确认日志仍在内存。可取消关闭并另存，或舍弃这些内容后退出。",
+                                             QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel)
+                if answer != QMessageBox.Discard:
+                    event.ignore()
+                    return
+        if self.gui_cli_bridge:
+            self.gui_cli_bridge.close()
         self.save_state()
         event.accept()

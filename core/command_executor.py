@@ -2,14 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-命令执行辅助模块, 负责将 GUI 表格和配置文件中的命令统一解析为可执行序列。
+命令执行辅助模块, 负责将 GUI 表格和配置文件中的命令统一解析为可执行序列.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
 Website: www.GuoHowe.com
 """
 
-from utils.ui_utils import UIUtils, SpecialCommandType
+from core.command_parser import Command, parse_input, command_parts, unescape_text, require_device_command
+
+from core.command_types import SpecialCommandType
+
+
+def build_module_index(rows):
+    """从命令行快照建立 GUI 模块映射,结构标记与勾选状态语义与执行器一致."""
+    modules, names, current = {"默认": []}, [], "默认"
+    for row, (enabled, command, _comment) in enumerate(rows):
+        kind, parameter = command_parts(command)
+        if kind == "mode":
+            current = parameter.strip()
+            modules[current] = []
+            names.append(current)
+        elif kind == "modeend":
+            if enabled:
+                modules[current].append(row)
+            current = "默认"
+        else:
+            modules[current].append(row)
+    return modules, names
 
 
 def normalize_command_row(row, index=0):
@@ -59,7 +79,7 @@ def command_type_from_string(cmd_type_str):
     return None
 
 
-def collect_module_commands(provider, module_name):
+def collect_module_commands(provider, module_name, parsed=False):
     """根据 mode/modeend 标记收集模块内启用的命令."""
     target = (module_name or "").strip()
     current_module = "默认"
@@ -70,12 +90,12 @@ def collect_module_commands(provider, module_name):
         row, enabled, command, _comment = normalize_command_row(raw_row, index)
         if command.strip().lower() == SpecialCommandType.MODEEND.value:
             if enabled and in_target:
-                commands.append((row, command, True, SpecialCommandType.MODEEND, ""))
+                commands.append((row, Command("ModeEnd", "")) if parsed else (row, command, True, SpecialCommandType.MODEEND, ""))
             current_module = "默认"
             in_target = target in ("全部", current_module)
             continue
 
-        cmd_type_str, param = UIUtils.parse_special_command(command)
+        cmd_type_str, param = command_parts(command)
 
         if cmd_type_str == "mode":
             current_module = param.strip()
@@ -84,12 +104,18 @@ def collect_module_commands(provider, module_name):
 
         if cmd_type_str == "modeend":
             if enabled and in_target:
-                commands.append((row, command, True, SpecialCommandType.MODEEND, param))
+                commands.append((row, Command("ModeEnd", param)) if parsed else (row, command, True, SpecialCommandType.MODEEND, param))
             current_module = "默认"
             in_target = target in ("全部", current_module)
             continue
 
         if not enabled or not in_target:
+            continue
+
+        require_device_command(command)
+
+        if parsed:
+            commands.append((row, parse_input(command)))
             continue
 
         if cmd_type_str:
@@ -98,6 +124,7 @@ def collect_module_commands(provider, module_name):
                 commands.append((row, command, True, command_type, param))
                 continue
 
-        commands.append((row, UIUtils.unescape_text(command), False))
+        # 原始解析结果保留"未知候选"和"显式字面转义"的区别,旧 CLI 不可二次猜测.
+        commands.append((row, unescape_text(command), False, parse_input(command)))
 
     return commands

@@ -2,6 +2,38 @@
 
 本文档面向开发者，提供项目架构、设计原则、扩展指南和技术细节。
 
+远程命令支持表、方案取舍、上传协议、独占恢复和验证入口见 [REMOTE_PROTOCOL.md](REMOTE_PROTOCOL.md)。`core/remote_firmware.py` 负责任务生命周期，`core/firmware_download.py` 提供无 Qt 的下载辅助逻辑，`core/firmware_worker.py` 提供 GUI 下载线程。Qt 工作线程须在 `finished` 后销毁/恢复资源，不能用业务结果信号代替线程退出。
+
+内置下载复用同级 `../firmware_downloader_project` 的 `core/downloader.py` 与 `core/protocol.py`，配套核心须提供 `result_status` 和当前 ACK/未知结果契约；CLI 仅收集纯核心，不导入下载窗口。两项目是独立 Git 仓库，不能用父目录的一次提交代替两仓提交；串口发布工作流检出下载仓库默认分支，发布前须先确保配套下载改动已可检出。下载自身的测试与手动构建入口由其 `docs/DEVELOPER_NOTES.md` 维护。
+
+固件工具按钮打开 `dialogs/firmware_download_dialog.py` 的 `ManagedFirmwareDownloadDialog`,复用下载项目的完整 UI,以主窗口所属模态窗口编辑本次参数,不运行独立下载线程. 点击开始后调用 `start_firmware_download_command`,本机参数通过仅本次有效的关键字参数传递,远程不传本机串口和协议参数. 主窗口的 `firmware_log`/`firmware_progress` 信号更新窗口,完成回调在资源恢复后解锁;关闭或 Esc 在任务期间仅请求取消,不阻塞等待或销毁回调接收者. 自动命令入口仍使用持久化默认参数及原进度框. UI 回归入口为 `checks/firmware_dialog_check.py`,无需修改配套下载仓库.
+
+常驻控制台入口为 `core/cli_console.py`，本机与 GUI 后端共用 `core/console_execution.py` 的 `ConsoleExecutor`。`LocalConsoleTransport` 管理本机读线程，GUI transport 在 Qt 线程调用窗口入口；不复制串口拥有者或固件算法。
+
+`core/console_serial.py::write_serial_once`是一次性CLI与本机终端共用的实际写入确认边界,按[pySerial官方write契约](https://pyserial.readthedocs.io/en/latest/pyserial_api.html#serial.Serial.write)检查返回计数,硬件OSError或短写抛`OperationUnknown`,只写一次、不补发. 一次性入口另确认flush,模块尾读/close及日志补尾错误合并到原未知消息,最终结果只在日志收尾后输出一次. `MachineSession.write`在stdout具体OSError处停止会话并置退出2,不递归向坏stdout报告fatal;按[Python官方SIGPIPE收尾模式](https://docs.python.org/3/library/signal.html#note-on-sigpipe)在退出前将失败标准流FD接null,避免解释器finalize再次写坏管道. GUI已受理任务仍沿用detach生命周期,不新增取消/重发.
+机器模式由 core/cli_machine.py 维护 stdin/stdout 帧、唯一终态和采集窗口,复用同一个 GuiConsoleBackend 与 ConsoleExecutor. 不另建串口传输/响应匹配器. 机器订阅的 RX、状态、执行终态和窗口确认按同一 QLocalSocket 流排序,任务连接保留原单请求生命周期,重复内部确认不输出. 目标漂移失败标记留在活动执行器,CLI 脱离后仍禁止其后续原语;健康 EOF 不取消受理任务.
+
+机器监视使用 GUI 线程 QTimer,并在每次原语/窗口关闭时同步核对. 参考 [Qt 5 QTimer 线程归属](https://doc.qt.io/archives/qt-5.15/qtimer.html#details) 与 [JSON-RPC 请求 ID 关联惯例](https://www.jsonrpc.org/specification#request_object);沿用本项目事件 JSONL,并非新增 JSON-RPC 或额外库. 原始串口无 wire ID,采集窗口不宣称设备因果. 精确字段、下载独占和 EOF 边界只归 [CLI 手册](OPERATION_MANUAL_FOR_CLI.md#机器常驻接口).
+
+新增接口验证入口: python -X faulthandler -m unittest discover -s checks -p machine_session_check.py -v. 测试通过真实 CLI 子进程和真实 GUI IPC,串口构造被禁止,端口枚举替换为空,只用独立临时配置与 mock 数据. 可通过 GHOWE_MACHINE_CANDIDATE 指向隔离候选 EXE,复用同一检查验候选机器帧;不指向实际用户工具或真实配置.
+
+
+CLI 的 `core/cli_bridge_client.py` 与 GUI 服务端 `core/gui_cli_bridge.py` 共用 `core/cli_protocol.py` 的端点、身份诊断与消息限制；客户端仅依赖 QtCore/QtNetwork，不导入窗口或控件。公共枚举与串口校验分别位于 `core/command_types.py`、`core/serial_config.py`；运行 `python checks/cli_dependency_check.py` 验证 CLI 不依赖 GUI 模块。
+
+`core/gui_config.py` 提供在线配置快照、字段规则、校验和事务应用；`snapshot_state()` 与自动保存共用状态序列化，查询不写盘。字段类型来自现有状态及工具注册表，枚举和范围复用控件与下载核心。使用现有环境可用的成熟 `jsonschema` 校验库，正式运行依赖已统一列入 `requirements.txt` 并接入发布工作流。参考 [JSON Schema 校验库](https://python-jsonschema.readthedocs.io/en/stable/validate/) 与 [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396)；不自行实现通用 schema 校验器。
+
+远程角色下拉框将界面名称与持久化值分离:显示“设备端（连接硬件）”/“控制端（远程操作）”,userData 保留现有 JSON 角色值,快照和 schema 使用 userData,加载/配置事务按 findData 定位. 模式应用后刷新地址候选,两种角色的标签统一为“地址”,与“模式”“端口”的控件保持等宽对齐;角色名称不决定 TCP 协议标识或已建立的连接。保存值契约见 [CLI 手册](OPERATION_MANUAL_FOR_CLI.md)。
+
+配置应用通过 `QSignalBlocker` 阻断设置过程的控件信号，并用 `_loading_state` 抑制自动保存；成功原子保存一次，失败恢复旧内存/控件。动作仍由显式 CLI 操作发起。修改活动连接参数及跨电脑混合修改被拒绝；远程五项串口配置经白名单 `configure` 请求执行，按在途 ID 关联、占用检查和结果回执处理；普通设备请求不保留完成历史，跨帧不保证幂等，未知结果不重发，详见远程协议。
+
+运行期工作 JSON 切换由 `core.gui_config.switch_file` 共用,保留同一个 ConfigManager 对象,事务替换 config/config_file. 候选直接只读解析并复用 schema/prepare/apply_widgets,不调用会创建/迁移保存的 ConfigManager.load_config. 缺省来自启动前控件及注册工具默认值,显式 null 不回退旧工作值. GUI 文件选择全过程抑制 autosave,失败/取消恢复原timer状态;成功丢弃旧dirty,后续统一保存到新路径. 桥接 config_file/endpoint 为启动身份,不随 working_config_file 迁移;basic/remote保留运行设置,无设备动作. 手动顶层SendMode用既有命令代号标记在途,避免Delay期间换表.
+
+新增类使用 Google 风格 docstring：类头描述职责、线程及生命周期，`__init__` 的 `Args:` 逐项说明参数、类型、单位、默认值和约束；配置字典还需逐项说明键。`FirmwareDownloader.__init__` 是完整范例。注释必须与实际失败/未知语义一致，不能把“已入队”描述为“设备完成”。
+
+docstring 与 `#` 行注释互补：对象职责和参数写入 docstring，局部实现意图、分支原因及注意事项保留在对应代码旁；不要为了统一 docstring 风格批量删除有用的行注释。
+
+命令表的加载、追加、单行/多行及文本插入统一使用 `add_command_row`。新行继承邻行字体与行高，首行在 `ensurePolished()` 后按尺寸提示计算；禁止再次乘 devicePixelRatio，否则会重复缩放。150% 缩放下已离线核对上述入口的字体和行高一致。
+
 ---
 
 ## 目录
@@ -14,6 +46,7 @@
 - [调试技巧](#调试技巧)
 - [性能优化](#性能优化)
 - [已知问题](#已知问题)
+- [验证与手动构建](#验证与手动构建)
 
 ---
 
@@ -52,10 +85,10 @@ serial_tool_project/
 │   └── command_widgets.py          # 命令表格控件
 ├── utils/                          # 辅助工具和 UI 样式
 │   ├── __init__.py
-│   └── ui_utils.py                 # UI 工具类、枚举、颜色常量
+│   └── ui_utils.py                 # GUI 菜单、颜色、资源路径与 CSV 转义
 ├── dialogs/                        # 交互对话框
 │   ├── __init__.py
-│   ├── config_dialog.py            # 配置对话框 (工具设置)
+│   ├── config_dialog.py            # 配置对话框 (日志规则与工具设置)
 │   └── comment_edit_dialog.py      # 注释编辑对话框
 └── docs/                           # 文档目录
     ├── VERSION_HISTORY.md          # 版本更新记录
@@ -121,50 +154,12 @@ class ConfigManager:
 
 ### 2. 特殊指令系统
 
-**设计目标**: 非阻塞异步执行
+命令词法、规范名及转义集中在 `core/command_parser.py`，模块归属由 `core/command_executor.py` 收集。GUI 表格命令由 `SpecialCommandManager` 调度；常驻控制台统一由 `ConsoleExecutor` 执行，两个入口保留各自的交互与生命周期职责。
 
-所有特殊指令采用异步设计，确保 UI 响应性。
-
-#### 指令类型
-
-[managers/special_command_manager.py](../managers/special_command_manager.py)
-
-| 指令 | 格式 | 异步机制 | 实现方式 |
-|------|------|----------|----------|
-| delay | `delay:500` | QTimer.singleShot | 非阻塞延迟 |
-| SendHex | `SendHex:FF 00` | 直接发送 | 十六进制转换 |
-| BaudRate | `BaudRate:9600` | 异步重连 | 断开 → 重连 |
-| SetEndlog | `SetEndlog:\r\n` | 立即生效 | 修改全局变量 |
-| SendMode | `SendMode:模块` | 完成回调 | 递归执行 |
-| mode | `mode:模块名` | 立即生效 | 模块标记 |
-
-#### SendMode 执行流程
-
-```python
-def execute_sendmode_inline(self, module_name, context, completion_callback=None):
-    """执行 SendMode 指令 (内联跳转)"""
-
-    def send_module_command(index=0):
-        if index >= len(commands_to_send):
-            # 所有命令发送完毕
-            if completion_callback:
-                completion_callback()  # 回调通知完成
-            return
-
-        # 发送当前命令
-        command_data = commands_to_send[index]
-        # ... 发送逻辑
-
-        # 递归发送下一条命令 (使用 QTimer 实现非阻塞)
-        QTimer.singleShot(interval, lambda: send_module_command(index + 1))
-
-    send_module_command(0)  # 开始执行
-```
-
-**关键点**:
-- 使用 **完成回调** 机制确保顺序执行
-- 使用 **QTimer.singleShot** 实现非阻塞
-- 支持 **嵌套跳转** (但不建议过度嵌套)
+- GUI 延时使用 Qt 定时器，控制台在工作线程中可取消等待，均不阻塞 GUI 输入。
+- `BaudRate` 更新活动句柄；`ComPort` 仅改下一次打开的选择；结束符、HEX 解码及串口参数转换复用现有纯函数。
+- SendMode 设备步骤等待实际回执，失败停止后续步骤；入队不等于完成。GUI 完成回调与 Qt 工作线程退出也不能混为一谈。
+- 命令能力及独立一次性/控制台差异以 [CLI 手册](OPERATION_MANUAL_FOR_CLI.md#命令与语义) 为准，不在这里复制命令表。
 
 ### 3. 配置持久化
 
@@ -174,7 +169,9 @@ def execute_sendmode_inline(self, module_name, context, completion_callback=None
 
 #### 配置文件结构
 
-```json
+以下为结构示意，版本/时间仅为示例，省略号不可直接导入：
+
+```text
 {
   "tool_version": "1.1.1",
   "tool_update_time": "2025-12-02 00:00:00",
@@ -229,7 +226,7 @@ def load_config(self):
 
 每个模块职责单一，通过明确的接口交互。
 
-#### 模块依赖关系
+#### GUI 模块依赖关系
 
 ```
 main.py
@@ -283,9 +280,14 @@ main_window.py (主窗口)
 | 文件 | 职责 |
 |------|------|
 | `core/serial_thread.py` | 后台串口线程, 负责串口打开, 读取, 写入, 波特率切换和错误信号上报。 |
-| `core/remote_control.py` | 局域网远程控制通信层, 实现主控端和远程端的 TCP JSON 消息交互。 |
+| `core/remote_control.py` | 局域网远程控制通信层, 实现设备端和控制端的 TCP JSON 消息交互。 |
 | `core/cli_runner.py` | CLI 模式执行器, 负责命令行参数, 配置读取, 串口发送, 模块执行和 CLI 输出。 |
 | `core/command_executor.py` | 命令序列解析器, 将 GUI 表格或配置文件中的命令统一解析为可执行模块命令。 |
+| `core/command_parser.py` | 命令词法与转义、HEX 和结束符纯转换。 |
+| `core/cli_console.py` / `core/console_execution.py` | 交互会话与本机/GUI 共用的控制台执行器。 |
+| `core/console_serial.py` / `core/gui_cli_bridge.py` | 本机串口拥有者与 GUI 线程适配；设备资源按入口协调。 |
+| `core/cli_protocol.py` / `core/receive_text.py` | 本机端点及身份诊断、增量接收解码、expect 摘要与原始 RX 流式追加。 |
+| `core/command_templates.py` / `core/template_worker.py` | 同源模板解析、转义及原子 IO；独立 CLI 同步调用，GUI 按钮与桥接调用窗口异步模板入口。worker 只访问行/配置副本，Qt 线程分块快照、应用及回滚；公开配置查询在事务期间拒绝读取半态。 |
 | `core/output_rules.py` | 输出策略中心, 统一管理输出过滤, 时间戳, 颜色, ANSI 映射和共享提示文案。 |
 
 ### managers
@@ -314,7 +316,8 @@ main_window.py (主窗口)
 
 | 文件 | 职责 |
 |------|------|
-| `dialogs/config_dialog.py` | 工具配置对话框, 负责外部工具路径, 启用状态和工具参数设置。 |
+| `dialogs/config_dialog.py` | 日志规则与工具配置草稿, 确定时通过共用配置事务一次保存, 取消无副作用。 |
+| `dialogs/firmware_download_dialog.py` | 复用固件工具 UI,将开始、取消和结果展示接到主窗口统一下载任务。 |
 | `dialogs/comment_edit_dialog.py` | 命令注释编辑对话框, 提供多行注释编辑界面。 |
 
 ### utils
@@ -323,7 +326,7 @@ main_window.py (主窗口)
 
 | 文件 | 职责 |
 |------|------|
-| `utils/ui_utils.py` | UI 通用定义, 包括输出来源枚举, 特殊命令枚举, 颜色常量, 资源路径和特殊命令解析函数。 |
+| `utils/ui_utils.py` | GUI 菜单样式、颜色常量、资源路径及 CSV 文本转义。命令解析位于 `core/command_parser.py`。 |
 
 ### 输出相关边界
 
@@ -346,67 +349,11 @@ main_window.py (主窗口)
 
 ### 添加新的特殊指令
 
-#### 步骤 1: 在 SpecialCommandType 中注册指令
-
-[utils/ui_utils.py](../utils/ui_utils.py)
-
-```python
-class SpecialCommandType(Enum):
-    """特殊指令类型枚举"""
-    DELAY = "delay"
-    SEND_HEX = "SendHex"
-    BAUD_RATE = "BaudRate"
-    SET_ENDLOG = "SetEndlog"
-    SEND_MODE = "SendMode"
-    MODE = "mode"
-    YOUR_NEW_COMMAND = "YourCommand"  # 新增指令
-```
-
-#### 步骤 2: 在 SpecialCommandManager 中实现解析
-
-[managers/special_command_manager.py](../managers/special_command_manager.py)
-
-```python
-def is_special_command(self, command):
-    """判断是否为特殊指令"""
-    return (... or
-            command.startswith("YourCommand:"))
-
-def parse_command(self, command):
-    """解析特殊指令"""
-    if command.startswith("YourCommand:"):
-        param = command.split(":", 1)[1]
-        return (SpecialCommandType.YOUR_NEW_COMMAND, param)
-    # ...
-```
-
-#### 步骤 3: 实现执行逻辑
-
-```python
-def execute_your_command(self, param, context, callback):
-    """执行你的新指令"""
-    # 实现逻辑
-    # ...
-
-    # 完成后调用回调
-    if callback:
-        callback()
-```
-
-#### 步骤 4: 在 main_window.py 中集成
-
-[main_window.py](../main_window.py)
-
-```python
-def execute_special_command(self, command, callback):
-    """执行特殊指令"""
-    cmd_type, param = self.special_command_manager.parse_command(command)
-
-    if cmd_type == SpecialCommandType.YOUR_NEW_COMMAND:
-        self.special_command_manager.execute_your_command(
-            param, context, callback
-        )
-```
+1. 在 [command_parser.py](../core/command_parser.py) 的 `COMMAND_NAMES` 注册规范名；若属于 GUI 特殊指令，再在 [command_types.py](../core/command_types.py) 补对应枚举。不要新增独立的前缀或冒号解析器。
+2. GUI 行为在 `SpecialCommandManager.commands` 注册处理函数，调用现有窗口设备入口；模块收集继续复用 `collect_module_commands`。
+3. 两种控制台在 `ConsoleExecutor` 增加公共语义，由 transport 适配本机串口或 GUI；独立一次性 CLI 仅在明确支持该能力时补 `cli_runner.py`，不要混淆模式契约。
+4. 异步设备操作沿用结果回执或完成回调。明确取消、占用、失败与未知结果语义，不能把请求入队当设备成功。
+5. 补相关行为回归及操作手册；参数、单位、默认值与返回值写入 docstring，局部实现意图留在代码旁。
 
 ### 添加新的外部工具
 
@@ -667,76 +614,27 @@ def slow_function():
 
 ## 性能优化
 
-### 1. 避免频繁更新 UI
+### 接收与显示
 
-**问题**: 高速接收数据时频繁更新 QTextBrowser 导致卡顿
+`SerialThread` 阻塞读取首字节后合并当前缓冲数据；显示仍经 `OutputManager.append_text` 和共享 `OutputRules`。先定位实际瓶颈，再调整接收批次或 UI 刷新，不建立第二套输出策略。
 
-**解决**:
+`OutputManager` 在信息产生时执行保留规则,使用有界 deque 保存原事件顺序和独立展示顺序,累计序号不因清空复用. 日志上限使用十进制MB,按 `sys.getsizeof` 累加记录对象及正文、来源、颜色、级别、时间戳、序号字段的内存预算;共享字段逐条计入,不采样进程内存. Qt文档/队列及归档另有开销,不承诺RSS等于该上限;超过上限批量淘汰至75%. 独立收录来源、级别、时间戳及发送快捷联动的产品语义统一见 [GUI手册](OPERATION_MANUAL_FOR_GUI.md#43-显示与保存接收区数据),不得从当前显示反推过去应保留的数据.
 
-```python
-class OutputManager:
-    def __init__(self):
-        self.buffer = []
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.flush_buffer)
-        self.update_timer.start(100)  # 每 100ms 刷新一次
+接收控件使用 `QPlainTextEdit` 的纯文本布局,保留颜色和菜单,关闭撤销及自动折行. 采用 [Qt官方日志查看器模式](https://doc.qt.io/qt-6/qplaintextedit.html#using-qplaintextedit-as-a-display-widget) 的有界历史思路,字节预算同时约束无换行流. 20ms刷新按每批64K字符/8ms预算推进,长记录分片,显示文本块最多约4096字符,原始记录不插显示换行. 历史淘汰按记录的实际UTF-16区间局部删除,不反复全区重绘;显示筛选变化才从已保留记录分批重绘,不从文件回灌. 残缺行的系统/错误展示仍有独立20ms固定宽限,首个换行、发送和关闭提前排空,原始RX/响应匹配/IPC不等待排版. 回归入口为 `checks/output_display_check.py` 和 `checks/log_stream_check.py`.
 
-    def append_output(self, text, source):
-        """添加到缓冲区"""
-        self.buffer.append((text, source))
+`core/archive_buffer.py`维护GUI/CLI共用的纯Python阈值状态机、预算、批次确认及失败另存,`write_batch`检查短写并flush/fsync. `core/log_archive.py`是Qt薄适配,`core/cli_log.py::ThreadArchive`用threading写者并在join后推进同一状态机;普通CLI无Qt事件循环也能收尾. `core/log_settings.py`集中默认值、收录与日志对象schema,管理入口惰性导入现有jsonschema,不导入GUI控件schema. 待写元组/序号/文本的字节预算达到上限80%时交给 `ArchiveBatch(QThread)`,后台使用Python缓冲文件写入并按批次flush/fsync,成功后在finished回调推进 `committed_sequence`;关闭、清空及退出请求强制补写尾部,退出等待finished后才销毁窗口. 批次开始/完成发出changed信号更新主界面状态,不轮询磁盘;文件路径保留在目录快捷按钮的悬停提示中,常规启停不显示文字,尾部写入和失败另存入口始终位于主界面. 在写批次外最多再积累一份上限,跟不上或文件失败显式停存,不无限排队、不自动重试部分写入,未确认内容支持用户另存新文件. 参考 [Python缓冲IO](https://docs.python.org/3/library/io.html#io.BufferedWriter) 和 [fsync](https://docs.python.org/3/library/os.html#os.fsync). 不新增第三方依赖.
 
-    def flush_buffer(self):
-        """批量刷新"""
-        if self.buffer:
-            for text, source in self.buffer:
-                self.text_browser.append(text)
-            self.buffer.clear()
-```
+日志设置位于 `state.log_settings`,显示时间戳位于 `state.receive_settings.show_timestamp`,空的其他设置分组移除. `SerialTool.log_settings` 与 `_send_display_selected` 保存运行态基础选择. `ConfigDialog` 独立复制日志草稿,以日志/工具页签呈现,确认时用 `gui_config.apply` 一次提交两类补丁,失败回滚且不关闭弹窗,取消无写入. 版本信息为弹窗顶端常驻两列,其下依次为工作JSON及配置页签. 主窗口不保留隐藏日志控件;日志schema独立声明MB范围,主界面只绑定文件保存开关. 目录快捷按钮通过同一gui_config.apply事务立即修改log_directory,弹窗仍使用草稿确认;两个目录入口共用can_change_log_directory门禁,保存开启、批次未完成或失败待另存时禁用. 发送联动的有效勾选通过阻断信号呈现,不写回基础值;schema/config-get输出基础选择,全量及快捷入口为独立字段. 日志设置纳入 `gui_config` 标量绑定/schema和配置事务;仅事务保存成功后同步运行态及裁剪历史,失败回滚不丢历史或开启文件. CLI协议时刻由事件入口独立生成,GUI不保留某条时间不改变协议字段. 独立CLI自动日志及显式Log共用新日志规则,原始RX/机器JSONL保持独立. 终端只保留归档缓冲,不保留GUI显示历史;桥接自动归档由GUI拥有,显式Log仍可保存本机会话. 日志管理由cli_log_commands及控制台LogGet/Check/Apply/Status/Recover提供,GUI复用配置事务和SerialTool.recover_log_archive;恢复结果只在finished后返回. 独立管理严格解析已有配置,通过ConfigManager的config_data快照入口复用原子保存,查询不触发启动创建/迁移. 回归入口为checks/cli_log_check.py.
 
-### 2. 优化大量命令加载
+全局替换默认模板由 `SerialTool.DEFAULT_GLOBAL_REPLACEMENT_RULE` 维护. `ReplacementRuleDialog` 对没有已保存规则且提供默认模板的入口自动预填草稿,复用默认按钮的超时取值;自定义规则和不提供模板的行规则不变,确认才提交,取消不影响运行态. 默认响应同时引用原命令的通道、地址和值,使用完整读回行结束避免分片前缀误通过;远程校验仍从成功写入回执开始. 回归入口为 `checks/replacement_defaults_check.py` 和 `checks/remote_capability_check.py` 的 `CommandChecks`.
 
-**问题**: 加载数千条命令时界面卡顿
+### 批量命令加载
 
-**解决**:
+导入替换复用同一行号的现有控件,`replace_command_row` 通过 `QSignalBlocker` 更新字段并重置搜索/校验/规则样式. 一次 `setRowCount` 调整行结构,空槽在后续分块中由 `add_command_row` 安装控件,不再逐行插入结构;字体/行高取已填邻行,普通追加/插入仍沿用原入口. 空槽期间配置查询拒绝半态,主界面及替换模式快捷入口共用控件禁用状态. 保留分块更新、旧表快照、取消/保存失败回滚和原子保存,首次应用时只解绑旧待校验项的行控件引用,其匹配、统计和诊断继续完成. 批量期间阻断表格信号并使用 `setUpdatesEnabled(False)`,结束时恢复;不重复应用字体、行高或设备像素比. 同规模替换可减少控件创建,预分配仅减少行结构变更,空表及大量新增行仍有实际控件创建成本,不保证总耗时固定改善.
 
-```python
-def load_commands(self, commands):
-    """批量加载命令"""
-    self.command_table.setUpdatesEnabled(False)  # 禁用更新
+### 配置写入
 
-    for command in commands:
-        self.command_table.add_command_row(...)
-
-    self.command_table.setUpdatesEnabled(True)  # 重新启用更新
-```
-
-### 3. 减少配置文件写入频率
-
-**问题**: 频繁保存配置导致磁盘 I/O 压力
-
-**解决**:
-
-```python
-class ConfigManager:
-    def __init__(self):
-        self.save_timer = QTimer()
-        self.save_timer.setSingleShot(True)
-        self.save_timer.timeout.connect(self._save_config)
-        self.dirty = False
-
-    def mark_dirty(self):
-        """标记配置已修改"""
-        self.dirty = True
-        self.save_timer.start(1000)  # 1 秒后保存
-
-    def _save_config(self):
-        """实际保存"""
-        if self.dirty:
-            self.save_config(self.config)
-            self.dirty = False
-```
-
----
+800ms 防抖、30 秒 dirty 兜底及退出保存由 `SerialTool` 协调，初始化恢复期间抑制自动保存；`ConfigManager` 负责原子写入。不要给纯配置管理器再添加 GUI 定时器。
 
 ## 已知问题
 
@@ -784,37 +682,23 @@ sudo usermod -a -G dialout $USER
 
 ---
 
-## 测试
+## 验证与手动构建
 
-### 单元测试 (计划中)
+常规开发只运行与改动相关的检查；纯文档调整核对参数、链接及示例语法即可。默认由用户手动构建，只有用户明确要求或必须验证打包行为时才构建 EXE；打包命令集中在 [README](../README.md#打包与入口)。
 
-```python
-import unittest
+从 `serial_tool_project` 目录按需选择：
 
-class TestSpecialCommandManager(unittest.TestCase):
-    def setUp(self):
-        self.manager = SpecialCommandManager(...)
-
-    def test_delay_command(self):
-        """测试 delay 指令"""
-        result = self.manager.parse_command("delay:500")
-        self.assertEqual(result, (SpecialCommandType.DELAY, 500))
-
-    def test_invalid_command(self):
-        """测试无效指令"""
-        with self.assertRaises(ValueError):
-            self.manager.parse_command("invalid:xxx")
+```powershell
+python -m unittest discover -s checks -p 'cli_dependency_check.py'
+python -m unittest discover -s checks -p 'console_check.py'
+python -X faulthandler -m unittest discover -s checks -p '*check.py'
 ```
 
-### 集成测试 (计划中)
+`checks/` 已覆盖解析、GUI 桥接、独立控制台、在线配置、远程认证及回环下载；使用临时配置、假串口和本机回环，不把结果当真实设备或跨 Windows 用户验收。Qt 测试先停止线程、排空回调再销毁对象，子进程管道须持续读取。
 
-```python
-class TestSerialCommunication(unittest.TestCase):
-    def test_send_receive(self):
-        """测试发送接收"""
-        # 使用虚拟串口进行测试
-        pass
-```
+[`checks.remote_download_check.TransportTests.test_client_stop_during_run_finally_cannot_escape_qthread`](../checks/remote_download_check.py) 在隔离子进程用同步屏障覆盖 `run` 退出与 `stop` 同时关闭连接：先捕获并清空共享 socket，再关闭捕获的句柄。Python 异常若逃出 `QThread.run`，PyQt 默认会通过 Qt fatal 终止进程；不能仅凭 Windows `0xC0000409` 判断内存越界。可用 `python -m unittest checks.remote_download_check.TransportTests -v` 单独运行相关回归；检查保留默认异常处理和真实退出码，仅在测试子进程内禁止错误对话框，不改变产品或系统设置。
+
+源码检查与产物验证分开：确需构建时使用安装了 `requirements.txt` 的同一 Python，并在隔离输出目录检查实际 EXE 的入口和依赖。`main.spec` 排除未用的 Pygments/requests 可选集成；CLI 保留 QtCore/QtNetwork，不引入 QtWidgets/QtGui。产物或包大小验证记录属于当次验收，不用固定数字描述长期契约。
 
 ---
 

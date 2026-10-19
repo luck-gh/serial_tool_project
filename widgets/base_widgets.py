@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-基础控件混入模块, 负责外部工具启动, 数值转换器调用和共享控件辅助逻辑。
+基础控件混入模块, 负责外部工具启动, 数值转换器调用和共享控件辅助逻辑.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
@@ -14,7 +14,8 @@ import sys
 import subprocess
 from PyQt5.QtWidgets import QAction, QApplication, QMessageBox
 from PyQt5.QtCore import Qt
-from utils.ui_utils import UIUtils, OutputSource
+from core.command_types import OutputSource
+from utils.ui_utils import UIUtils
 
 class BaseWidgetMixin:
     """基础组件混入类, 提供通用功能"""
@@ -41,15 +42,15 @@ class BaseWidgetMixin:
             # 明确移除置顶标志
             new_flags = current_flags & ~Qt.WindowStaysOnTopHint
 
-        # 如果标志改变，需要设置并重新显示
+        # 如果标志改变,需要设置并重新显示
         if new_flags != current_flags:
             dialog.setWindowFlags(new_flags)
 
-        # 无论标志是否改变，都需要显示对话框
+        # 无论标志是否改变,都需要显示对话框
         dialog.show()
 
     def show_tool_dialog(self, dialog, tool_name, config_manager, main_window=None):
-        """显示工具窗口, 默认不绑定主窗口层级。"""
+        """显示工具窗口, 默认不绑定主窗口层级."""
         dialog.setParent(None)
         dialog.setWindowModality(Qt.NonModal)
         if hasattr(dialog, "setModal"):
@@ -65,13 +66,14 @@ class BaseWidgetMixin:
         self.apply_always_on_top_setting(dialog, tool_name, config_manager)
 
     def _remember_tool_dialog(self, dialog):
-        """保留独立工具窗口引用, 支持同类工具多开。"""
+        """保留独立工具窗口引用, 支持同类工具多开."""
         if not hasattr(self, "_open_tool_dialogs"):
             self._open_tool_dialogs = []
         self._open_tool_dialogs.append(dialog)
         dialog.destroyed.connect(lambda _=None, closed_dialog=dialog: self._forget_tool_dialog(closed_dialog))
 
     def _forget_tool_dialog(self, dialog):
+        """从窗口引用列表移除已销毁工具窗口,避免继续持有失效的 Qt 对象."""
         if not hasattr(self, "_open_tool_dialogs"):
             return
         self._open_tool_dialogs = [
@@ -97,12 +99,16 @@ class BaseWidgetMixin:
         return None
 
     def prepare_tool_launch(self, tool_name, config_manager):
-        """
-        准备启动工具 - 通用化处理
-        如果工具需要独占串口,则关闭当前串口连接
+        """处理普通外部工具的串口独占提示,不用于固件下载任务的统一门禁.
+
+        Args:
+            tool_name (str): 工具注册表名称,用于查询显示名和独占要求.
+            config_manager (ConfigManager): 工具配置来源.
 
         Returns:
-            bool: 是否可以继续启动工具
+            bool: 用户未拒绝且准备流程结束时为 True.当前旧工具路径在最多五秒
+                轮询及额外 500 ms 等待后返回,不保证线程确已退出;不能作为可靠
+                串口租约使用.固件入口使用主窗口的显式关闭结果和线程退出检查.
         """
         main_window = self.get_main_window()
 
@@ -125,7 +131,7 @@ class BaseWidgetMixin:
                     elif hasattr(main_window, 'close_serial'):
                         main_window.close_serial()
 
-                    # 等待串口线程完全停止并释放资源(最多等待5秒)
+                    # 最多等待串口线程 5 秒;等待结束不代表已确认线程退出.
                     import time
                     wait_count = 0
                     while hasattr(main_window, 'serial_thread') and main_window.serial_thread and wait_count < 50:
@@ -134,7 +140,7 @@ class BaseWidgetMixin:
                         # 处理事件队列,确保线程有机会停止
                         QApplication.processEvents()
 
-                    # 额外等待一段时间确保系统完全释放串口句柄(500ms)
+                    # 再留出 500ms 供系统清理;此等待本身不能保证句柄已经释放.
                     time.sleep(0.5)
 
                     if hasattr(main_window, 'output_manager'):
@@ -172,7 +178,16 @@ class BaseWidgetMixin:
                 menu.addAction(calc_action)
 
     def open_bit_calculator(self, text="", conversion_type="HEX"):
-        """打开位计算器 (通用逻辑)"""
+        """根据选中文本打开进制转换工具,优先使用有效的外部工具路径.
+
+        Args:
+            text (str): 待转换文本,默认空;按钮传入的 bool 会被当作空文本.
+            conversion_type (str): 初始进制,默认 HEX,可使用 DEC.
+
+        外部工具通过子进程启动,不受内置窗口的置顶配置控制.内置工具按开发/
+        打包目录定位,优先包导入以避免与当前 widgets 模块冲突;独立窗口引用
+        由调用方保留.已有导入回退仅按当前实现执行,本方法不修改工具代码.
+        """
         # 尝试从自身获取 config_manager, 如果没有则尝试从主窗口获取
         config_manager = getattr(self, 'config_manager', None)
         main_window = self.get_main_window()
@@ -208,9 +223,9 @@ class BaseWidgetMixin:
             except Exception as e:
                 if main_window and hasattr(main_window, 'output_manager'):
                     main_window.output_manager.append_text(f"错误: 通过自定义路径打开位计算器失败: {str(e)}", OutputSource.ERROR)
-                # 失败后继续尝试内置逻辑
         
-        # 2. 如果没有自定义路径或启动失败，尝试内置逻辑 (作为模块导入)
+                # 失败后继续尝试内置逻辑
+        # 2. 如果没有自定义路径或启动失败,尝试内置逻辑 (作为模块导入)
         try:
             # 获取基础路径 (处理打包后的情况)
             if getattr(sys, 'frozen', False):
@@ -222,7 +237,7 @@ class BaseWidgetMixin:
                 # 假设 base_widgets.py 在 widgets/ 目录下
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 
-                # 向上查找，直到找到包含 number_converter_project 的目录
+                # 向上查找,直到找到包含 number_converter_project 的目录
                 # 这样比固定层级更鲁棒
                 search_path = current_dir
                 import_root = None
@@ -234,7 +249,7 @@ class BaseWidgetMixin:
                     search_path = os.path.dirname(search_path)
                 
                 if not import_root:
-                    # 如果没找到，回退到默认的父目录逻辑
+                    # 如果没找到,回退到默认的父目录逻辑
                     base_path = os.path.dirname(current_dir)
                     import_root = os.path.dirname(base_path)
             
@@ -243,7 +258,7 @@ class BaseWidgetMixin:
                 sys.path.insert(0, import_root)
             
             # 动态导入
-            # 始终优先作为包导入，这样内部的相对导入才能正常工作，且不会与当前工程的 widgets 目录冲突
+            # 始终优先作为包导入,这样内部的相对导入才能正常工作,且不会与当前工程的 widgets 目录冲突
             try:
                 from number_converter_project.number_conversion_dialog import NumberConversionDialog
             except ImportError as e:
@@ -256,7 +271,7 @@ class BaseWidgetMixin:
                     f"File: {os.path.abspath(__file__)}"
                 ]
                 
-                # 如果作为包导入失败，尝试直接导入模块 (兼容旧版本或特殊结构)
+                # 如果作为包导入失败,尝试直接导入模块 (兼容旧版本或特殊结构)
                 if import_root:
                     calc_project_path = os.path.join(import_root, 'number_converter_project')
                     if calc_project_path not in sys.path:
@@ -271,7 +286,7 @@ class BaseWidgetMixin:
                 
                 from number_conversion_dialog import NumberConversionDialog
             
-            # 创建并显示独立窗口; 不传主窗口作为 parent, 避免工具窗口始终压在主窗口上方。
+            # 创建并显示独立窗口; 不传主窗口作为 parent, 避免工具窗口始终压在主窗口上方.
             # 获取配置的默认参数
             default_params = config_manager.get_number_conversion_params()
             self.calc_dialog = NumberConversionDialog(
@@ -293,7 +308,11 @@ class BaseWidgetMixin:
                 main_window.output_manager.append_text(f"错误: 打开位计算器失败: {str(e)}", OutputSource.ERROR)
 
     def open_bin_hex_converter(self):
-        """打开 Bin to Hex 转换器"""
+        """打开 BIN/HEX 转换工具,优先使用配置的外部程序,否则定位内置模块.
+
+        内置工具使用独立窗口并应用工具配置;外部子进程不受内置窗口置顶设置
+        控制.文件转换操作由所打开工具负责,当前入口不转换文件.
+        """
         # 获取 config_manager
         config_manager = getattr(self, 'config_manager', None)
         main_window = self.get_main_window()
@@ -362,7 +381,7 @@ class BaseWidgetMixin:
             # 获取配置参数
             params = config_manager.get_bin_hex_converter_params()
 
-            # 创建并显示独立窗口; 不传主窗口作为 parent, 避免工具窗口始终压在主窗口上方。
+            # 创建并显示独立窗口; 不传主窗口作为 parent, 避免工具窗口始终压在主窗口上方.
             self.bin_hex_dialog = BinHexConverterDialog(
                 parent=None,
                 data_width=params["data_width"],
@@ -382,320 +401,39 @@ class BaseWidgetMixin:
                 main_window.output_manager.append_text(f"错误: 打开 Bin to Hex 转换器失败: {str(e)}", OutputSource.ERROR)
 
     def open_firmware_downloader(self):
-        """打开固件下载工具"""
-        # 获取 config_manager
-        config_manager = getattr(self, 'config_manager', None)
+        """先打开完整下载窗口,由窗口的开始按钮提交共用下载任务."""
+        from core.firmware_download import get_firmware_downloader_class
         main_window = self.get_main_window()
-
-        if not config_manager and main_window:
-            config_manager = getattr(main_window, 'config_manager', None)
-
-        if not config_manager:
+        if not main_window:
             return
-
-        tool_name = "firmware_downloader"
-
-        # **关键修复：在关闭串口之前先获取串口配置**
-        # 获取当前串口配置（从主窗口传递）
-        port_config = {}
-        if main_window:
-            # 从主窗口的串口线程获取配置
-            if hasattr(main_window, 'serial_thread') and main_window.serial_thread:
-                serial_thread = main_window.serial_thread
-                port_config = {
-                    'port': serial_thread.port,
-                    'baudrate': serial_thread.baudrate,
-                    'bytesize': serial_thread.bytesize,
-                    'parity': serial_thread.parity,
-                    'stopbits': serial_thread.stopbits
-                }
-            # 如果串口未打开，从UI控件获取配置
-            elif hasattr(main_window, 'port_combo') and hasattr(main_window, 'baud_combo'):
-                import serial
-                port_text = main_window.port_combo.currentText()
-                port = port_text.split(' ')[0] if port_text else ''
-
-                parity_map = {"None": serial.PARITY_NONE, "Even": serial.PARITY_EVEN,
-                             "Odd": serial.PARITY_ODD, "Mark": serial.PARITY_MARK}
-                parity = parity_map.get(main_window.parity_combo.currentText(), serial.PARITY_NONE)
-
-                stopbits_map = {"1": serial.STOPBITS_ONE, "1.5": serial.STOPBITS_ONE_POINT_FIVE,
-                               "2": serial.STOPBITS_TWO}
-                stopbits = stopbits_map.get(main_window.stop_bits_combo.currentText(), serial.STOPBITS_ONE)
-
-                port_config = {
-                    'port': port,
-                    'baudrate': int(main_window.baud_combo.currentText()) if main_window.baud_combo.currentText() else 115200,
-                    'bytesize': int(main_window.data_bits_combo.currentText()) if main_window.data_bits_combo.currentText() else 8,
-                    'parity': parity,
-                    'stopbits': stopbits
-                }
-
-        # 通用化处理: 检查是否需要关闭串口（在获取配置之后执行）
-        if not self.prepare_tool_launch(tool_name, config_manager):
-            return  # 用户取消了操作
-
-        # 1. 优先检查用户配置的自定义路径
-        custom_path = config_manager.get_tool_path(tool_name)
-        if custom_path and os.path.exists(custom_path):
-            try:
-                command = []
-                if custom_path.endswith('.py'):
-                    command.append(sys.executable)
-                command.append(custom_path)
-                        
-                # 传递串口参数和所有配置参数（注意：外部工具通过命令行参数接收配置）
-                if port_config.get('port'):
-                    import serial
-                    # 获取所有配置参数
-                    params = config_manager.get_firmware_downloader_params()
-
-                    # 将 parity 和 stopbits 转换为字符串表示
-                    parity_reverse_map = {
-                        serial.PARITY_NONE: 'N',
-                        serial.PARITY_EVEN: 'E',
-                        serial.PARITY_ODD: 'O',
-                        serial.PARITY_MARK: 'M',
-                        serial.PARITY_SPACE: 'S'
-                    }
-                    stopbits_reverse_map = {
-                        serial.STOPBITS_ONE: '1',
-                        serial.STOPBITS_ONE_POINT_FIVE: '1.5',
-                        serial.STOPBITS_TWO: '2'
-                    }
-
-                    parity_str = parity_reverse_map.get(port_config.get('parity', serial.PARITY_NONE), 'N')
-                    stopbits_str = stopbits_reverse_map.get(port_config.get('stopbits', serial.STOPBITS_ONE), '1')
-
-                    # 基础串口配置
-                    command.extend([
-                        '--port', port_config['port'],
-                        '--baudrate', str(port_config['baudrate']),
-                        '--bytesize', str(port_config.get('bytesize', 8)),
-                        '--parity', parity_str,
-                        '--stopbits', stopbits_str
-                    ])
-
-                    # 初始文件
-                    initial_file = params.get("initial_file", "")
-                    if initial_file and os.path.exists(initial_file):
-                        command.extend(['--file', initial_file])
-
-                    # 下载基本配置
-                    command.extend([
-                        '--packet-size', str(params['packet_size']),
-                        '--start-command', params['start_command']
-                    ])
-
-                    if params.get('add_packet_crc'):
-                        command.append('--add-packet-crc')
-                        command.extend(['--packet-crc-type', params['packet_crc_type']])
-
-                    # 开始命令 ACK 配置
-                    if params.get('wait_start_ack'):
-                        command.append('--wait-start-ack')
-                        command.extend([
-                            '--start-ack-timeout', str(params['start_ack_timeout']),
-                            '--start-ack-check-mode', params['start_ack_check_mode']
-                        ])
-                        if params.get('start_ack_check_length'):
-                            command.append('--start-ack-check-length')
-                            command.extend(['--start-ack-expected-length', str(params['start_ack_expected_length'])])
-                        if params.get('start_ack_check_data'):
-                            command.append('--start-ack-check-data')
-                            command.extend([
-                                '--start-ack-expected-data', params['start_ack_expected_data'],
-                                '--start-ack-data-format', params['start_ack_data_format']
-                            ])
-
-                    # 数据包 ACK 配置
-                    if params.get('wait_packet_ack'):
-                        command.append('--wait-packet-ack')
-                        command.extend([
-                            '--packet-ack-timeout', str(params['packet_ack_timeout']),
-                            '--packet-ack-check-mode', params['packet_ack_check_mode']
-                        ])
-                        if params.get('packet_ack_check_length'):
-                            command.append('--packet-ack-check-length')
-                            command.extend(['--packet-ack-expected-length', str(params['packet_ack_expected_length'])])
-                        if params.get('packet_ack_check_data'):
-                            command.append('--packet-ack-check-data')
-                            command.extend([
-                                '--packet-ack-expected-data', params['packet_ack_expected_data'],
-                                '--packet-ack-data-format', params['packet_ack_data_format']
-                            ])
-                        if params.get('packet_ack_check_crc'):
-                            command.append('--packet-ack-check-crc')
-                            command.extend(['--packet-ack-crc-type', params['packet_ack_crc_type']])
-
-                    # 末尾数据包 ACK 配置
-                    if params.get('wait_last_packet_ack'):
-                        command.append('--wait-last-packet-ack')
-                        command.extend([
-                            '--last-packet-ack-timeout', str(params['last_packet_ack_timeout']),
-                            '--last-packet-ack-check-mode', params['last_packet_ack_check_mode']
-                        ])
-                        if params.get('last_packet_ack_check_length'):
-                            command.append('--last-packet-ack-check-length')
-                            command.extend(['--last-packet-ack-expected-length', str(params['last_packet_ack_expected_length'])])
-                        if params.get('last_packet_ack_check_data'):
-                            command.append('--last-packet-ack-check-data')
-                            command.extend([
-                                '--last-packet-ack-expected-data', params['last_packet_ack_expected_data'],
-                                '--last-packet-ack-data-format', params['last_packet_ack_data_format']
-                            ])
-                        if params.get('last_packet_ack_check_crc'):
-                            command.append('--last-packet-ack-check-crc')
-                            command.extend(['--last-packet-ack-crc-type', params['last_packet_ack_crc_type']])
-
-                    # 结尾字符串配置
-                    if params.get('send_end_string'):
-                        command.append('--send-end-string')
-                        command.extend(['--end-string', params['end_string']])
-
-                # 注意: 外部工具通过subprocess启动,无法控制窗口置顶属性(always_on_top配置仅对内置工具有效)
-                subprocess.Popen(command, cwd=os.path.dirname(custom_path) if os.path.dirname(custom_path) else None)
-                return
-            except Exception as e:
-                if main_window and hasattr(main_window, 'output_manager'):
-                    main_window.output_manager.append_text(f"错误: 通过自定义路径打开固件下载工具失败: {str(e)}", OutputSource.ERROR)
-
-        # 2. 尝试内置逻辑 (作为模块导入)
+        if main_window.serial_operation_busy():
+            main_window._firmware_download_log("ERROR", "已有固件任务占用串口")
+            return
         try:
-            # 获取基础路径
-            if getattr(sys, 'frozen', False):
-                base_path = sys._MEIPASS
-                import_root = base_path
-            else:
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                search_path = current_dir
-                import_root = None
-
-                # 向上查找包含 firmware_downloader_project 的目录
-                for _ in range(4):
-                    potential_root = os.path.join(search_path, 'firmware_downloader_project')
-                    if os.path.isdir(potential_root):
-                        import_root = search_path
-                        break
-                    search_path = os.path.dirname(search_path)
-
-                if not import_root:
-                    base_path = os.path.dirname(current_dir)
-                    import_root = os.path.dirname(base_path)
-
-            # 将导入根路径加入 sys.path
-            if import_root and import_root not in sys.path:
-                sys.path.insert(0, import_root)
-
-            # 动态导入
-            try:
-                from firmware_downloader_project.firmware_downloader_dialog import FirmwareDownloaderDialog
-            except ImportError:
-                if import_root:
-                    downloader_project_path = os.path.join(import_root, 'firmware_downloader_project')
-                    if downloader_project_path not in sys.path:
-                        sys.path.insert(0, downloader_project_path)
-                from firmware_downloader_dialog import FirmwareDownloaderDialog
-
-            # 获取配置参数
-            params = config_manager.get_firmware_downloader_params()
-
-            # 转换 parity 和 stopbits 为字符串/数字格式（用于内部工具）
-            import serial
-            parity_value = port_config.get('parity', serial.PARITY_NONE)
-            stopbits_value = port_config.get('stopbits', serial.STOPBITS_ONE)
-
-            # parity 转换映射
-            parity_reverse_map = {
-                serial.PARITY_NONE: 'N',
-                serial.PARITY_EVEN: 'E',
-                serial.PARITY_ODD: 'O',
-                serial.PARITY_MARK: 'M',
-                serial.PARITY_SPACE: 'S'
-            }
-            # stopbits 转换映射（转为浮点数）
-            stopbits_reverse_map = {
-                serial.STOPBITS_ONE: 1.0,
-                serial.STOPBITS_ONE_POINT_FIVE: 1.5,
-                serial.STOPBITS_TWO: 2.0
-            }
-
-            parity_str = parity_reverse_map.get(parity_value, 'N')
-            stopbits_float = stopbits_reverse_map.get(stopbits_value, 1.0)
-
-            # 创建并显示独立窗口，传递所有参数; 不传主窗口作为 parent, 避免窗口层级被主窗口固定。
-            self.firmware_downloader_dialog = FirmwareDownloaderDialog(
-                parent=None,
-                # 初始文件
-                initial_file=params.get("initial_file", ""),
-                # 串口配置
-                port=port_config.get('port', ''),
-                baudrate=port_config.get('baudrate', 115200),
-                bytesize=port_config.get('bytesize', 8),
-                parity=parity_str,
-                stopbits=stopbits_float,
-                # 下载基本配置
-                packet_size=params["packet_size"],
-                start_command=params["start_command"],
-                add_packet_crc=params["add_packet_crc"],
-                packet_crc_type=params["packet_crc_type"],
-                # 开始命令 ACK 配置
-                wait_start_ack=params["wait_start_ack"],
-                start_ack_timeout=params["start_ack_timeout"],
-                start_ack_check_length=params["start_ack_check_length"],
-                start_ack_expected_length=params["start_ack_expected_length"],
-                start_ack_check_data=params["start_ack_check_data"],
-                start_ack_expected_data=params["start_ack_expected_data"],
-                start_ack_data_format=params["start_ack_data_format"],
-                start_ack_check_mode=params["start_ack_check_mode"],
-                # 数据包 ACK 配置
-                wait_packet_ack=params["wait_packet_ack"],
-                packet_ack_timeout=params["packet_ack_timeout"],
-                packet_ack_check_length=params["packet_ack_check_length"],
-                packet_ack_expected_length=params["packet_ack_expected_length"],
-                packet_ack_check_data=params["packet_ack_check_data"],
-                packet_ack_expected_data=params["packet_ack_expected_data"],
-                packet_ack_data_format=params["packet_ack_data_format"],
-                packet_ack_check_crc=params["packet_ack_check_crc"],
-                packet_ack_crc_type=params["packet_ack_crc_type"],
-                packet_ack_check_mode=params["packet_ack_check_mode"],
-                # 末尾数据包 ACK 配置
-                wait_last_packet_ack=params["wait_last_packet_ack"],
-                last_packet_ack_timeout=params["last_packet_ack_timeout"],
-                last_packet_ack_check_length=params["last_packet_ack_check_length"],
-                last_packet_ack_expected_length=params["last_packet_ack_expected_length"],
-                last_packet_ack_check_data=params["last_packet_ack_check_data"],
-                last_packet_ack_expected_data=params["last_packet_ack_expected_data"],
-                last_packet_ack_data_format=params["last_packet_ack_data_format"],
-                last_packet_ack_check_crc=params["last_packet_ack_check_crc"],
-                last_packet_ack_crc_type=params["last_packet_ack_crc_type"],
-                last_packet_ack_check_mode=params["last_packet_ack_check_mode"],
-                # 结尾字符串配置
-                send_end_string=params["send_end_string"],
-                end_string=params["end_string"]
-            )
-            self.show_tool_dialog(self.firmware_downloader_dialog, tool_name, config_manager, main_window)
-
-        except ImportError as e:
-            QMessageBox.information(main_window if main_window else self, "提示", f"固件下载工具模块未找到或未打包。\n错误信息: {str(e)}")
-            if main_window and hasattr(main_window, 'output_manager'):
-                main_window.output_manager.append_text(f"错误: 未能加载固件下载工具模块: {str(e)}", OutputSource.ERROR)
-        except Exception as e:
-            QMessageBox.critical(main_window if main_window else self, "错误", f"打开固件下载工具失败: {str(e)}")
-            if main_window and hasattr(main_window, 'output_manager'):
-                main_window.output_manager.append_text(f"错误: 打开固件下载工具失败: {str(e)}", OutputSource.ERROR)
+            get_firmware_downloader_class()
+            from dialogs.firmware_download_dialog import ManagedFirmwareDownloadDialog
+        except ImportError as exc:
+            QMessageBox.warning(main_window, "固件下载工具不可用", str(exc))
+            return
+        dialog = ManagedFirmwareDownloadDialog(main_window)
+        if main_window.config_manager.get_tool_config("firmware_downloader").get("always_on_top", False):
+            dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        try:
+            dialog.exec_()
+        finally:
+            dialog.deleteLater()
 
     def handle_common_shortcuts(self, event):
-        """处理通用的快捷键逻辑"""
+        """识别 Ctrl+H 并将输入控件选中文本交给 HEX 计算器,返回是否处理该事件."""
         # Ctrl+H: 唤醒 HEX 计算
         if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_H:
             selected_text = ""
-            if hasattr(self, 'selectedText'): # QLineEdit
+            if hasattr(self, 'selectedText'):  # QLineEdit
                 selected_text = self.selectedText().strip()
-            elif hasattr(self, 'textCursor'): # QTextEdit / QTextBrowser
+            elif hasattr(self, 'textCursor'):  # QTextEdit / QTextBrowser
                 selected_text = self.textCursor().selectedText().strip()
             
             if selected_text:
                 self.open_bit_calculator(selected_text, "HEX")
-                return True # 表示事件已处理
+                return True  # 表示事件已处理
         return False

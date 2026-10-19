@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""接收区数据保存来源选择对话框。"""
+"""接收区数据保存来源选择对话框."""
 
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
-from utils.ui_utils import OutputSource
+from core.command_types import OutputSource
 
 
 class SaveDataSelectionDialog(QDialog):
@@ -72,7 +72,7 @@ class SaveDataSelectionDialog(QDialog):
         )
         system_group.setEnabled(self.source_checks[OutputSource.SYSTEM].isChecked())
 
-        hint = QLabel("保存筛选独立于当前显示来源，未显示的信息也可以保存。")
+        hint = QLabel("导出当前仍保留的历史，可包含已保留但隐藏的信息；已舍弃或超限淘汰的信息不会恢复。")
         hint.setStyleSheet("color: #666666;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -109,3 +109,48 @@ class SaveDataSelectionDialog(QDialog):
             )
             return
         self.accept()
+
+
+class SystemLogLevelDialog(QDialog):
+    """系统日志级别多选对话框,勾选过程中保持打开."""
+
+    LEVELS = (
+        ("normal", "常规"),
+        ("warning", "告警"),
+        ("info", "信息"),
+        ("debug", "调试"),
+    )
+
+    def __init__(self, selected_levels, parent=None):
+        """创建系统日志级别多选框,用户勾选时不立即关闭.
+
+        Args:
+            selected_levels (Iterable[str]): 当前启用的日志级别集合.
+            parent (QWidget | None): Qt 父窗口,默认 None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("系统日志级别")
+        self.setMinimumWidth(260)
+        layout = QVBoxLayout(self)
+
+        group = QGroupBox("系统日志级别（可多选）")
+        group_layout = QVBoxLayout(group)
+        self.level_checks = {}
+        for level, label in self.LEVELS:
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(level in selected_levels)
+            self.level_checks[level] = checkbox
+            group_layout.addWidget(checkbox)
+        layout.addWidget(group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_levels(self):
+        """返回当前勾选的系统日志级别集合."""
+        return {
+            level for level, checkbox in self.level_checks.items()
+            if checkbox.isChecked()
+        }

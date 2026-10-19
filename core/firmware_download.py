@@ -1,23 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""固件下载特殊指令的共享辅助逻辑。"""
+"""固件下载特殊指令的共享辅助逻辑."""
 
 from __future__ import annotations
 
 import importlib
 import os
 import sys
+import serial
 from pathlib import Path
 
-from PyQt5.QtCore import QThread, pyqtSignal
 
 
 FIRMWARE_TOOL_NAME = "firmware_downloader"
 
 
 def normalize_firmware_path(value: str) -> str:
-    """规范化特殊指令或配置中的固件文件路径。"""
+    """规范化特殊指令或配置中的固件文件路径."""
     path = str(value or "").strip()
     if len(path) >= 2 and path[0] == path[-1] and path[0] in ("'", '"'):
         path = path[1:-1].strip()
@@ -27,7 +27,7 @@ def normalize_firmware_path(value: str) -> str:
 
 
 def resolve_firmware_path(parameter: str, params: dict) -> tuple[str, str | None]:
-    """按“指令参数 -> 工具配置”的优先级解析固件路径。"""
+    """按'指令参数 -> 工具配置'的优先级解析固件路径."""
     provided = bool(str(parameter or "").strip())
     candidate = parameter if provided else (params or {}).get("initial_file", "")
     path = normalize_firmware_path(candidate)
@@ -40,10 +40,11 @@ def resolve_firmware_path(parameter: str, params: dict) -> tuple[str, str | None
 
 
 def build_download_config(params: dict) -> dict:
-    """将串口助手保存的平铺配置转换为下载器所需的嵌套配置。"""
+    """将串口助手保存的平铺配置转换为下载器所需的嵌套配置."""
     params = params or {}
 
     def ack_config(prefix: str, include_crc: bool) -> dict:
+        """将指定 start_ack/packet_ack/last_packet_ack 前缀的平铺字段组装成 ACK 字典."""
         config = {
             "check_length": bool(params.get(f"{prefix}_check_length", False)),
             "expected_length": int(params.get(f"{prefix}_expected_length", 1)),
@@ -81,7 +82,7 @@ def build_download_config(params: dict) -> dict:
 
 
 def firmware_project_importable() -> bool:
-    """判断内置或开发环境中的固件下载核心是否可导入。"""
+    """判断内置或开发环境中的固件下载核心是否可导入."""
     try:
         importlib.import_module("firmware_downloader_project.core.downloader")
         return True
@@ -98,48 +99,63 @@ def firmware_project_importable() -> bool:
 
 
 def get_firmware_downloader_class():
-    """动态获取现有固件下载核心，避免复制下载和 ACK 逻辑。"""
+    """动态获取现有固件下载核心,避免复制下载和 ACK 逻辑."""
     if not firmware_project_importable():
         raise ImportError("固件下载模块未找到或未打包")
     module = importlib.import_module("firmware_downloader_project.core.downloader")
     return module.FirmwareDownloader
 
 
-class FirmwareDownloadWorker(QThread):
-    """在后台线程中执行现有 FirmwareDownloader。"""
-
-    log_signal = pyqtSignal(str, str)
-    progress_signal = pyqtSignal(int, int, str)
-    finished_signal = pyqtSignal(bool, str)
-
-    def __init__(self, firmware_path: str, port_config: dict, download_config: dict, parent=None):
-        super().__init__(parent)
-        self.firmware_path = firmware_path
-        self.port_config = dict(port_config)
-        self.download_config = dict(download_config)
-        self.downloader = None
-
-    def cancel(self):
-        if self.downloader is not None:
-            self.downloader.stop()
-
-    def run(self):
-        try:
-            downloader_class = get_firmware_downloader_class()
-            self.downloader = downloader_class(self.port_config, self.download_config)
-            success, message = self.downloader.open_port()
-            if not success:
-                self.finished_signal.emit(False, message)
-                return
-            self.log_signal.emit("INFO", message)
-            success, message = self.downloader.download(
-                self.firmware_path,
-                progress_callback=lambda current, total, text: self.progress_signal.emit(current, total, text),
-                log_callback=lambda level, text: self.log_signal.emit(level, text),
-            )
-            self.finished_signal.emit(success, message)
-        except Exception as exc:
-            self.finished_signal.emit(False, f"下载器启动失败: {exc}")
-        finally:
-            if self.downloader is not None:
-                self.downloader.close_port()
+def build_external_firmware_arguments(firmware_path, port_config, params):
+    """构造外部下载工具的自动下载参数,字段与内置下载器保持一致."""
+    parity_map = {
+        serial.PARITY_NONE: "N", serial.PARITY_EVEN: "E", serial.PARITY_ODD: "O",
+        serial.PARITY_MARK: "M", serial.PARITY_SPACE: "S",
+    }
+    stopbits_map = {
+        serial.STOPBITS_ONE: "1", serial.STOPBITS_ONE_POINT_FIVE: "1.5",
+        serial.STOPBITS_TWO: "2",
+    }
+    args = [
+        "--auto-start", "--exit-on-complete", "--file", firmware_path,
+        "--port", str(port_config["port"]),
+        "--baudrate", str(port_config["baudrate"]),
+        "--bytesize", str(port_config["bytesize"]),
+        "--parity", parity_map.get(port_config["parity"], "N"),
+        "--stopbits", stopbits_map.get(port_config["stopbits"], "1"),
+        "--packet-size", str(params["packet_size"]),
+        "--start-command", str(params["start_command"]),
+    ]
+    if params.get("add_packet_crc"):
+        args.extend(["--add-packet-crc", "--packet-crc-type", str(params["packet_crc_type"])])
+    for prefix, cli_prefix, supports_crc in (
+        ("start_ack", "start-ack", False),
+        ("packet_ack", "packet-ack", True),
+        ("last_packet_ack", "last-packet-ack", True),
+    ):
+        if not params.get(f"wait_{prefix}"):
+            continue
+        args.extend([
+            f"--wait-{cli_prefix}",
+            f"--{cli_prefix}-timeout", str(params[f"{prefix}_timeout"]),
+            f"--{cli_prefix}-check-mode", str(params[f"{prefix}_check_mode"]),
+        ])
+        if params.get(f"{prefix}_check_length"):
+            args.extend([
+                f"--{cli_prefix}-check-length",
+                f"--{cli_prefix}-expected-length", str(params[f"{prefix}_expected_length"]),
+            ])
+        if params.get(f"{prefix}_check_data"):
+            args.extend([
+                f"--{cli_prefix}-check-data",
+                f"--{cli_prefix}-expected-data", str(params[f"{prefix}_expected_data"]),
+                f"--{cli_prefix}-data-format", str(params[f"{prefix}_data_format"]),
+            ])
+        if supports_crc and params.get(f"{prefix}_check_crc"):
+            args.extend([
+                f"--{cli_prefix}-check-crc",
+                f"--{cli_prefix}-crc-type", str(params[f"{prefix}_crc_type"]),
+            ])
+    if params.get("send_end_string"):
+        args.extend(["--send-end-string", "--end-string", str(params["end_string"])])
+    return args

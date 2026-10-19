@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-自定义控件模块, 负责接收区文本控件, 可折叠分组框和可点击下拉框等通用控件。
+自定义控件模块, 负责接收区文本控件, 可折叠分组框和可点击下拉框等通用控件.
 
 Author: GuoHowe
 E-Mail: 844396800@qq.com
@@ -12,11 +12,12 @@ Website: www.GuoHowe.com
 import os
 import subprocess
 import sys
-from PyQt5.QtWidgets import (QTextEdit, QTextBrowser, QAction, QMessageBox, 
+from PyQt5.QtWidgets import (QTextEdit, QPlainTextEdit, QAction, QMessageBox,
                              QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFrame, QSizePolicy,
                              QComboBox)
 from PyQt5.QtCore import Qt, pyqtSignal
-from utils.ui_utils import UIUtils, resource_path, OutputSource, SpecialCommandType
+from core.command_types import OutputSource, SpecialCommandType
+from utils.ui_utils import UIUtils, resource_path
 from widgets.base_widgets import BaseWidgetMixin
 
 class ClickableComboBox(QComboBox):
@@ -74,7 +75,7 @@ class ExpandingTextEdit(QTextEdit):
         if new_height < min_height:
             new_height = min_height
 
-        # 设置一个合理的最大高度（例如, 4行的高度）
+        # 设置一个合理的最大高度(例如, 4行的高度)
         max_height = (single_line_height * 4) + margins.top() + margins.bottom() + 5
         if new_height > max_height:
             new_height = max_height
@@ -99,10 +100,13 @@ class ExpandingTextEdit(QTextEdit):
 
 from managers.config_manager import ConfigManager
 
-class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
-    """自定义文本浏览器, 支持右键菜单和外部工具调用"""
+class CustomTextBrowser(QPlainTextEdit, BaseWidgetMixin):
+    """只读日志流控件,使用纯文本布局并保留颜色、菜单和外部工具入口."""
     def __init__(self, config_manager: ConfigManager, parent=None, save_callback=None, clear_callback=None):
         super().__init__(parent)
+        self.setReadOnly(True)
+        self.setUndoRedoEnabled(False)
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.config_manager = config_manager
         self.save_callback = save_callback
         self.clear_callback = clear_callback
@@ -136,7 +140,7 @@ class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
             clear_action.triggered.connect(self.clear_callback)
             menu.addAction(clear_action)
 
-        # --- 外部工具：数字转换器 ---
+        # --- 外部工具:数字转换器 ---
         selected_text = self.textCursor().selectedText().strip() if self.textCursor().hasSelection() else None
         self.add_number_converter_actions(menu, self.config_manager, selected_text)
 
@@ -149,7 +153,7 @@ class CustomTextBrowser(QTextBrowser, BaseWidgetMixin):
         super().keyPressEvent(event)
 
 class CollapsibleGroupBox(QWidget):
-    """一个可以折叠的容器控件，支持水平或垂直折叠"""
+    """一个可以折叠的容器控件,支持水平或垂直折叠"""
     toggled = pyqtSignal(bool)
 
     def __init__(self, title="", parent=None, horizontal=False):
@@ -205,13 +209,13 @@ class CollapsibleGroupBox(QWidget):
         
         if horizontal:
             self.content_layout = QHBoxLayout(self.content_widget)
-            # 水平折叠时，内容在右侧，按钮在左侧
+            # 水平折叠时,内容在右侧,按钮在左侧
             self.main_layout.addWidget(self.toggle_button)
             self.main_layout.addWidget(self.content_widget)
             self.content_widget.setVisible(False)
         else:
             self.content_layout = QVBoxLayout(self.content_widget)
-            # 垂直折叠时，内容在下方，按钮在上方
+            # 垂直折叠时,内容在下方,按钮在上方
             self.main_layout.addWidget(self.toggle_button)
             self.main_layout.addWidget(self.content_widget)
             self.content_widget.setVisible(False)

@@ -95,7 +95,9 @@ class ReplacementRuleDialog(QDialog):
         self.clear_requested = False
         self.default_rule = normalize_rule(default_rule)
         self.default_timeout_ms = max(10, min(60000, int(default_timeout_ms)))
-        rule = normalize_rule(rule) or {"find": "", "replace": "", "options": {}}
+        rule = normalize_rule(rule)
+        use_default = rule is None and self.default_rule is not None
+        rule = rule or {"find": "", "replace": "", "options": {}}
         options = MatchOptions.from_dict(rule.get("options"))
         response_validation = rule.get("response_validation") or {}
         self.response_settings = {
@@ -178,6 +180,9 @@ class ReplacementRuleDialog(QDialog):
         footer_layout.addWidget(buttons)
         layout.addLayout(footer_layout)
 
+        # 无已保存规则时预填默认草稿;取消不会改变窗口运行态或 JSON.
+        if use_default:
+            self._apply_default_rule()
         self._update_response_controls()
         self.find_input.setFocus()
 

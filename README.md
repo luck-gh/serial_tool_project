@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>专为嵌入式开发者设计的高效串口调试工具</strong><br>
-  <sub>版本 1.2.5 | 2026-08-26</sub>
+  <sub>版本 1.2.6 | 2026-10-14</sub>
 </p>
 
 <p align="center">
@@ -30,18 +30,22 @@
 
 GHowe 串口调试助手是一个功能丰富的串口调试工具，基于 PyQt5 构建，提供直观的界面、强大的命令管理、丰富的特殊指令支持，让串口调试变得简单高效。
 
-README 只保留项目介绍、启动入口和文档导航。图形界面的具体操作、快捷键、查找、替换发送、特殊命令和命令行参数请查看下方操作手册。
+详细操作见 [GUI 手册](docs/OPERATION_MANUAL_FOR_GUI.md)、[CLI 手册](docs/OPERATION_MANUAL_FOR_CLI.md)；远程通信见 [协议说明](docs/REMOTE_PROTOCOL.md)。
 
-### 最新更新 (v1.2.5)
+### 最新更新 (v1.2.6)
 
-- ✅ 配置与命令发生变化后自动防抖保存，不再依赖关闭串口或正常退出
-- ✅ 长时间连续编辑时增加 dirty 状态定时兜底，关闭窗口时仍执行最终保存
-- ✅ JSON 配置改为临时文件写入、磁盘刷新和原子替换，降低异常中断造成文件损坏的风险
-- ✅ 串口接收改为阻塞等待首字节，减少无数据时的线程空转和 CPU 占用
-- ✅ 串口停止流程增加停止事件和 `cancel_read()`，由工作线程统一释放句柄
-- ✅ 命令启用状态、替换规则、界面布局及远程设置等持久化字段均纳入自动保存
-- ✅ 增加配置持久化与 Qt 防抖自动保存回归检查
-- ✅ 完善 Windows EXE 的 GUI、CLI 操作手册和常见问题说明
+- ✅ 新增远程 BIN 上传与设备端下载，校验文件完整性并协调串口独占
+- ✅ 远程设备操作增加能力检查和结果回执，区分失败、取消及结果未知
+- ✅ 修复远程连接退出时并发关闭连接导致的偶发 Python 进程崩溃
+- ✅ 新增 `--via-gui`，CLI 可控制已运行窗口并同步进度和结果
+- ✅ 新增 `--console` 常驻控制台及显式 `--via-gui --console --machine` JSONL 机器接口;复用连接、任务终态和 RX 采集窗口,一次性 `--expect` 区分无响应与响应不匹配
+- ✅ GUI 桥接失联时控制台报错退出,远程意外断连由在线 GUI/CLI 共享错误,未确认的已发操作保留结果未知
+- ✅ CLI 与 GUI 共用 CSV/TXT 模板导入导出，GUI 异步处理并显示进度、支持取消；一次性命令和控制台可追加保存原始设备 RX，见 [文件操作](docs/OPERATION_MANUAL_FOR_CLI.md#模板与接收文件)
+- ✅ 模板及接收保存结果在 GUI/CLI 使用相同系统提示；时间戳开关只改变显示，历史记录保留原时刻
+- ✅ 桥接失败提供真实 Windows 身份及配置路径诊断；当前仍要求同用户桥接
+- ✅ CLI 支持全量本机配置查询、规则查询、校验与应用，以及远程连接启停和设备端五项串口参数设置
+- ✅ CLI 正常操作记录归入系统调试级别，简化完成提示
+- ✅ 修复新增命令行的字体和行高不一致
 
 👉 查看完整更新: [版本更新记录](docs/VERSION_HISTORY.md)
 
@@ -54,7 +58,7 @@ README 只保留项目介绍、启动入口和文档导航。图形界面的具�
 - **替换发送能力** - 支持全局规则、命令行独立规则和正则分组替换
 - **智能输出过滤** - 按来源分类显示发送、接收、系统、错误，快速定位问题
 - **自动状态保存** - 配置、命令和界面布局变更后自动防抖保存，异常退出后可恢复最近状态
-- **远程控制** - 支持局域网主控端/远程端串口控制
+- **远程控制** - 支持局域网设备端/控制端串口控制
 - **CLI 自动化** - 支持命令行发送字符串、十六进制和部分特殊命令
 - **外部工具集成** - 支持固件下载工具、进制转换器等，完整传递串口配置和 ACK 参数
 
@@ -64,7 +68,7 @@ README 只保留项目介绍、启动入口和文档导航。图形界面的具�
 - ⚡ **非阻塞异步执行** - 使用 QTimer 实现特殊指令，UI 始终响应
 - 🔄 **版本自动兼容** - 配置文件自动迁移，无需手动升级
 - 🖥️ **GUI/CLI 独立入口** - 兼容版、GUI 专用版和 CLI 专用版可同时打包，默认共用同一份配置
-- 🌐 **局域网远程控制** - 支持主控端/远程端协同控制串口设备
+- 🌐 **局域网远程控制** - 支持设备端/控制端协同控制串口设备
 - 🎨 **模块化架构** - 清晰的代码结构，便于维护和二次开发
 - 🔧 **完整串口参数** - 支持数据位、校验位、停止位完整配置传递
 - 📋 **标准 CSV 处理** - 符合 RFC 4180 标准，兼容 Excel/LibreOffice
@@ -92,23 +96,21 @@ README 只保留项目介绍、启动入口和文档导航。图形界面的具�
 
 ### 环境要求
 
-- **Python**: 3.6+
+- **Python**: 3.10+
 - **操作系统**: Windows / Linux / macOS
 - **依赖库**:
-  - PyQt5 (≥5.15.0) - GUI 框架
-  - pyserial (≥3.5) - 串口通信
+  - PyQt5 (≥5.15,<6) - GUI 框架及本机 IPC
+  - pyserial (≥3.5,<4) - 串口通信
+  - jsonschema (≥4.18,<5) - 在线配置校验
+  - prompt_toolkit (≥3.0.43,<4) - CLI 交互控制台
 
 ### 安装依赖
 
 ```bash
-pip install PyQt5 pyserial
+python -m pip install -r requirements.txt
 ```
 
-如需打包可执行文件：
-
-```bash
-pip install pyinstaller
-```
+按需可使用虚拟环境；不是打包前提。手动构建见下方[打包与入口](#打包与入口)。
 
 ### 启动 GUI
 
@@ -167,6 +169,10 @@ CLI 适合脚本化调用、自动化测试和 CI/本地批处理。
 - 发送普通字符串或十六进制数据
 - 执行配置中的模块
 - 发送后读取设备响应
+- 使用 --via-gui --console --machine 接收正式 UTF-8 JSONL 机器事件与显式 RX 窗口,由调用方匹配响应和停止失败
+- 使用常驻控制台连续调试，或通过 `--via-gui --config` 操作已运行 GUI
+- 独立CLI与GUI共用日志收录和分块后台归档;显示/日志时间戳独立,支持日志配置查询/校验/原子应用、实际归档状态及显式另存恢复. 参数为`--log-action`,控制台为`LogGet/LogCheck/LogApply/LogStatus/LogRecover`,详见CLI手册.
+- 一次性 `--expect` 返回匹配结果及有界接收摘要，便于 Agent 判断响应
 - 返回进程退出码，便于脚本判断成功或失败
 
 完整 CLI 参数和示例请查看：[CLI 操作手册](docs/OPERATION_MANUAL_FOR_CLI.md)。
@@ -182,7 +188,7 @@ mode, modeend, delay, SendHex, BaudRate, ComPort, SetEndlog, SendMode, StopConti
 特殊命令在 GUI 和 CLI 中的支持范围不同。格式、示例和差异说明请查看：
 
 - [GUI 操作手册 - 特殊命令](docs/OPERATION_MANUAL_FOR_GUI.md#9-特殊命令)
-- [CLI 操作手册 - 特殊命令支持](docs/OPERATION_MANUAL_FOR_CLI.md#6-特殊命令支持)
+- [CLI 操作手册 - 命令与语义](docs/OPERATION_MANUAL_FOR_CLI.md#命令与语义)
 
 ---
 
@@ -190,11 +196,18 @@ mode, modeend, delay, SendHex, BaudRate, ComPort, SetEndlog, SendMode, StopConti
 
 ### 打包命令
 
-在 `serial_tool_project` 目录运行：
+需要内置固件下载时，将配套的 `firmware_downloader_project` 源码放在本项目同级目录；下载核心与协议直接从该仓库复用，不是 `requirements.txt` 中的 PyPI 包。两仓需使用配套源码，详见 [开发说明](docs/DEVELOPER_NOTES.md)。
+
+由用户在 `serial_tool_project` 目录手动运行（PyInstaller 属于构建工具，按需安装）：
 
 ```bash
-pyinstaller main.spec
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller main.spec
 ```
+
+使用安装了 `requirements.txt` 的同一 Python 执行 `python -m PyInstaller`，避免打包命令指向其他环境。
+打包配置会排除未使用的语法着色、图片导出和 HTTP Schema 扩展，无需为控制 EXE 体积卸载系统环境中的其他库。
+CLI 产物仍包含 QtCore/QtNetwork 用于本机通信，但不包含 QtWidgets/QtGui；GUI 产物保留完整界面依赖。
 
 ### 可执行文件
 
@@ -206,7 +219,7 @@ pyinstaller main.spec
 
 GUI、通用 EXE 和 CLI EXE 会打包 GUI/CLI 两份操作手册，便于随发布包分发。
 
-GitHub Release 上传时会在扩展名前追加版本号，例如 `GHowe_串口调试助手_GUI_v1.2.5.exe`；本地执行 `pyinstaller main.spec` 时仍使用上表中的文件名。
+GitHub Release 上传时会在扩展名前追加版本号，例如 `GHowe_串口调试助手_GUI_v1.2.6.exe`；本地执行上述打包命令时仍使用表中的文件名。重命名或跨工作目录启动可能改变默认配置路径，GUI/CLI 协作时显式指定 GUI 的实际配置绝对路径。
 
 ---
 
@@ -225,7 +238,7 @@ GitHub Release 上传时会在扩展名前追加版本号，例如 `GHowe_串口
 
 ## 故障排查与支持
 
-常见串口问题通常与端口占用、参数不匹配、结尾符设置或设备未就绪有关。具体操作建议请优先查看 [GUI 操作手册](docs/OPERATION_MANUAL_FOR_GUI.md#10-常见问题)。
+常见串口问题通常与端口占用、参数不匹配、结尾符设置或设备未就绪有关。具体操作建议请优先查看 [GUI 操作手册](docs/OPERATION_MANUAL_FOR_GUI.md#11-常见问题)。
 
 如果需要反馈问题，建议附带：
 

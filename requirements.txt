@@ -1,0 +1,4 @@
+PyQt5>=5.15,<6
+pyserial>=3.5,<4
+jsonschema>=4.18,<5
+prompt_toolkit>=3.0.43,<4

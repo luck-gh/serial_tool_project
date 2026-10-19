@@ -15,6 +15,7 @@ import signal
 from PyQt5.QtWidgets import (QApplication, QStyleFactory)
 from PyQt5.QtCore import QTimer
 from main_window import SerialTool
+from app_identity import parse_gui_arguments
 from core.cli_runner import build_parser, run_cli, should_run_cli
 from version_info import TOOL_VERSION, TOOL_VERSION_DATE
 
@@ -49,9 +50,10 @@ def main():
         args = parser.parse_args()
         sys.exit(run_cli(args, exe_name, TOOL_VERSION, TOOL_VERSION_DATE))
 
+    args, qt_args = parse_gui_arguments(sys.argv[1:])
     hide_console_for_gui()
 
-    app = QApplication(sys.argv)
+    app = QApplication([sys.argv[0], *qt_args])
 
     # 让开发环境中的 Ctrl+C 通过 Qt 事件循环安全退出，避免强制中断原生控件。
     signal.signal(signal.SIGINT, lambda *_args: app.quit())
@@ -65,7 +67,8 @@ def main():
     window = SerialTool(
         tool_version=TOOL_VERSION,
         tool_version_date=TOOL_VERSION_DATE,
-        exe_name=exe_name
+        exe_name=exe_name,
+        config_file=args.config,
     )
     window.show()
     sys.exit(app.exec_())

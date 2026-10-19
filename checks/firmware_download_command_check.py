@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""FirmwareDownload 特殊指令的轻量级回归检查。"""
+"""FirmwareDownload 特殊指令的轻量级回归检查."""
 
 import os
 import sys
@@ -13,17 +13,33 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.command_parser import command_parts
 from core.command_executor import command_type_from_string
 from core.firmware_download import build_download_config, resolve_firmware_path
 from managers.config_manager import ConfigManager
 from managers.output_manager import OutputManager, OutputRecord
-from utils.ui_utils import SpecialCommandType, UIUtils
-from utils.ui_utils import OutputSource
+from core.command_types import SpecialCommandType
+from utils.ui_utils import UIUtils
+from core.command_types import OutputSource
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt5.QtWidgets import QApplication
+from widgets.custom_widgets import CustomTextBrowser
+
+APP = QApplication.instance() or QApplication([])
 
 
 class FirmwareDownloadCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.browser = CustomTextBrowser(None)
+        self.manager = OutputManager(self.browser, lambda: False, lambda: "red")
+
+    def tearDown(self):
+        self.manager.clear()
+        self.browser.deleteLater()
+        APP.processEvents()
+
     def test_parser_keeps_windows_drive_colon_in_parameter(self):
-        command_type, parameter = UIUtils.parse_special_command(
+        command_type, parameter = command_parts(
             r'FirmwareDownload:"D:\firmware files\app.bin"'
         )
         self.assertEqual(command_type, "firmwaredownload")
@@ -78,10 +94,7 @@ class FirmwareDownloadCommandTests(unittest.TestCase):
             self.assertTrue(config_manager.is_tool_available("firmware_downloader"))
 
     def test_system_log_level_filter_keeps_non_system_records_visible(self):
-        manager = object.__new__(OutputManager)
-        manager.rules = type(
-            "Rules", (), {"source_enabled": staticmethod(lambda _source: True)}
-        )()
+        manager = self.manager
         manager.system_level_filter_getter = lambda level: level != "debug"
 
         self.assertTrue(
@@ -101,12 +114,10 @@ class FirmwareDownloadCommandTests(unittest.TestCase):
         )
 
     def test_export_can_filter_system_log_levels(self):
-        manager = object.__new__(OutputManager)
-        manager.records = [
-            OutputRecord("system normal\n", OutputSource.SYSTEM, "gray", "normal"),
-            OutputRecord("system debug\n", OutputSource.SYSTEM, "gray", "debug"),
-            OutputRecord("serial data\n", OutputSource.RECEIVE, "black"),
-        ]
+        manager = self.manager
+        manager.append_text("system normal", OutputSource.SYSTEM)
+        manager.append_text("system debug", OutputSource.SYSTEM, system_level="debug")
+        manager.append_text("serial data\n", OutputSource.RECEIVE)
         exported = manager.text_for_sources(
             {OutputSource.SYSTEM, OutputSource.RECEIVE},
             {"normal"},

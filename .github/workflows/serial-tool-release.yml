@@ -143,15 +143,31 @@ jobs:
         run: git log -1 --pretty=%B HEAD > ../release-notes.md
 
       - name: Smoke test packaged CLI entry points
+        timeout-minutes: 2
         shell: pwsh
         working-directory: serial_tool_project
         env:
           RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
         run: |
-          & ".\dist\GHowe_串口调试助手_CLI_v$env:RELEASE_VERSION.exe" --help
-          if ($LASTEXITCODE -ne 0) { throw "CLI --help failed: $LASTEXITCODE" }
-          & ".\dist\GHowe_串口调试助手_v$env:RELEASE_VERSION.exe" --cli --help
-          if ($LASTEXITCODE -ne 0) { throw "Universal --cli --help failed: $LASTEXITCODE" }
+          # 旧CLI在runner重定向管道使用cp1252,中文帮助须在真实Windows控制台输出.
+          $checks = @(
+            @{ File = ".\dist\GHowe_串口调试助手_CLI_v$env:RELEASE_VERSION.exe"; Arguments = @('--help') },
+            @{ File = ".\dist\GHowe_串口调试助手_v$env:RELEASE_VERSION.exe"; Arguments = @('--cli', '--help') }
+          )
+          foreach ($check in $checks) {
+            $process = Start-Process -FilePath $check.File -ArgumentList $check.Arguments -WindowStyle Hidden -PassThru
+            try {
+              if (-not $process.WaitForExit(45000)) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(5000)) { throw "Smoke process cleanup timed out: $($check.File)" }
+                throw "--help timed out: $($check.File)"
+              }
+              if ($process.ExitCode -ne 0) { throw "--help failed with exit $($process.ExitCode): $($check.File)" }
+              Write-Host "--help passed: $($check.File)"
+            } finally {
+              $process.Dispose()
+            }
+          }
 
       - name: Refuse to overwrite an existing release
         uses: actions/github-script@v7

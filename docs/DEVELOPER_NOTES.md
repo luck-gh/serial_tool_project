@@ -700,7 +700,7 @@ python -X faulthandler -m unittest discover -s checks -p '*check.py'
 
 源码检查与产物验证分开：确需构建时使用安装了 `requirements.txt` 的同一 Python，并在隔离输出目录检查实际 EXE 的入口和依赖。`main.spec` 排除未用的 Pygments/requests 可选集成；CLI 保留 QtCore/QtNetwork，不引入 QtWidgets/QtGui。产物或包大小验证记录属于当次验收，不用固定数字描述长期契约。
 
-发布工作流接受 `vX.Y.Z` 和 `VX.Y.Z` 标签推送,并严格核对目标标签、README 和 `version_info.py` 的版本. 补发已有历史标签时,从默认分支运行 `Serial Tool Release`,填写 `release_tag`,例如 `gh workflow run serial-tool-release.yml --ref master -f release_tag=V1.2.3`. 默认分支提供发布工具,源码、`main.spec` 和提交说明均取指定标签,不重指历史标签,也不会因修改触发规则而自动补发. 1.2.3–1.2.5 沿用原流程的 PyQt5/pyserial/PyInstaller 依赖,其后使用目标源码的 `requirements.txt`;1.2.3–1.2.6 的固件依赖在工作流中固定到已核对接口的提交. 工作流摘要记录四个项目的实际构建 SHA,Release 附件使用规范化的 `_v<版本号>` 后缀,latest 按版本语义确定. 发布仍须有用户授权,构建成功不等于真实设备验收.
+发布工作流接受 `vX.Y.Z` 和 `VX.Y.Z` 标签推送,并严格核对目标标签、README 和 `version_info.py` 的版本. 补发已有历史标签时,从默认分支运行 `Serial Tool Release`,填写 `release_tag`,例如 `gh workflow run serial-tool-release.yml --ref master -f release_tag=V1.2.3`. 默认分支提供发布工具,源码、`main.spec` 和提交说明均取指定标签,不重指历史标签,也不会因修改触发规则而自动补发. 1.2.3–1.2.5 沿用原流程的 PyQt5/pyserial/PyInstaller 依赖,其后使用目标源码的 `requirements.txt`;1.2.3–1.2.6 的固件依赖在工作流中固定到已核对接口的提交. 工作流摘要记录四个项目的实际构建 SHA,通过冒烟后的三个 EXE、提交说明和 SHA 清单作为工作流附件保留7天,便于上传失败时核对或恢复. 创建已有标签的 Release 不传 `target_commitish`,避免 GitHub 对显式旧提交中的工作流差异要求额外 Workflows 写权限;目标源码归属由精确检出和 SHA 清单证明. Release 附件使用规范化的 `_v<版本号>` 后缀,latest 按版本语义确定. 发布仍须有用户授权,构建成功不等于真实设备验收.
 
 ---
 

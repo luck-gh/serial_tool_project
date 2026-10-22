@@ -58,7 +58,6 @@ jobs:
             README.md \
             version_info.py | tee version-output.txt
           cat version-output.txt >> "$GITHUB_OUTPUT"
-          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Select historical firmware dependency
         id: dependencies
@@ -96,7 +95,7 @@ jobs:
         shell: bash
         run: |
           for project in serial_tool_project number_converter_project bin_hex_converter_project firmware_downloader_project; do
-            echo "$project=$(git -C "$project" rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$project=$(git -C "$project" rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY" build-sources.txt
           done
 
       - name: Install build dependencies
@@ -169,6 +168,18 @@ jobs:
             }
           }
 
+      - name: Preserve verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-tool-${{ env.RELEASE_TAG }}
+          path: |
+            serial_tool_project/dist/*.exe
+            release-notes.md
+            build-sources.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
       - name: Refuse to overwrite an existing release
         uses: actions/github-script@v7
         with:
@@ -189,7 +200,7 @@ jobs:
         with:
           name: ${{ env.RELEASE_TAG }}
           tag_name: ${{ env.RELEASE_TAG }}
-          target_commitish: ${{ steps.validate.outputs.source_sha }}
+          # 标签已存在且源码已精确检出;显式传旧SHA会触发额外Workflows写权限检查.
           body_path: release-notes.md
           fail_on_unmatched_files: true
           make_latest: legacy

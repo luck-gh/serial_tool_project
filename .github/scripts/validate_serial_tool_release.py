@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 
-TAG_PATTERN = re.compile(r"^v(\d+\.\d+\.\d+)$")
+TAG_PATTERN = re.compile(r"[vV]([0-9]+\.[0-9]+\.[0-9]+)")
 README_PATTERN = re.compile(r"版本\s+([0-9]+\.[0-9]+\.[0-9]+)")
 MAIN_PATTERN = re.compile(r'^TOOL_VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
@@ -27,9 +27,9 @@ def fail(message: str) -> int:
 
 
 def parse_tag_version(tag: str) -> str:
-    match = TAG_PATTERN.match(tag)
+    match = TAG_PATTERN.fullmatch(tag)
     if not match:
-        raise ValueError(f"标签格式错误: {tag}，必须为 vX.Y.Z")
+        raise ValueError(f"标签格式错误: {tag}，必须为 vX.Y.Z 或 VX.Y.Z")
     return match.group(1)
 
 

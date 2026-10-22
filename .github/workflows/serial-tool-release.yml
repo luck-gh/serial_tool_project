@@ -1,10 +1,19 @@
 name: Serial Tool Release
+run-name: Release ${{ inputs.release_tag || github.ref_name }}
 
 on:
   push:
     tags:
-      - 'v*'
+      - '[vV]*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag, for example V1.2.6 or v1.2.6'
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -14,10 +23,55 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout release tooling
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
+          path: release_tools
+
+      - name: Select release tag
+        shell: bash
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^[vV][0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'release_tag must be vX.Y.Z or VX.Y.Z' >&2
+            exit 1
+          fi
+
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           path: serial_tool_project
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate release versions
+        id: validate
+        shell: bash
+        working-directory: serial_tool_project
+        run: |
+          python ../release_tools/.github/scripts/validate_serial_tool_release.py \
+            "$RELEASE_TAG" \
+            README.md \
+            version_info.py | tee version-output.txt
+          cat version-output.txt >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Select historical firmware dependency
+        id: dependencies
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
+        run: |
+          # 历史版本分别使用已核对对话框/下载核心接口的配套提交.
+          case "$RELEASE_VERSION" in
+            1.2.3) echo 'firmware_ref=1628cb6a9ccb45e457e6987f736d22bc5bf27e13' >> "$GITHUB_OUTPUT" ;;
+            1.2.4|1.2.5) echo 'firmware_ref=0ca6a331dbb5d06aeb834c5592ee480eac318121' >> "$GITHUB_OUTPUT" ;;
+            1.2.6) echo 'firmware_ref=b187b587d92d5c30ae45077c61ec770fa352ff14' >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Checkout number converter project
         uses: actions/checkout@v4
@@ -35,38 +89,33 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/firmware_downloader_project
+          ref: ${{ steps.dependencies.outputs.firmware_ref }}
           path: firmware_downloader_project
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Validate release versions
-        id: validate
+      - name: Record build source commits
         shell: bash
-        working-directory: serial_tool_project
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
-          python .github/scripts/validate_serial_tool_release.py \
-            "$TAG_NAME" \
-            README.md \
-            version_info.py | tee version-output.txt
-          while IFS='=' read -r key value; do
-            echo "$key=$value" >> "$GITHUB_OUTPUT"
-          done < version-output.txt
+          for project in serial_tool_project number_converter_project bin_hex_converter_project firmware_downloader_project; do
+            echo "$project=$(git -C "$project" rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Install build dependencies
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
         run: |
           python -m pip install --upgrade pip
-          pip install -r serial_tool_project/requirements.txt pyinstaller
+          # 这三个原标签尚无 requirements.txt,显式沿用其原发布依赖.
+          case "$RELEASE_VERSION" in
+            1.2.3|1.2.4|1.2.5) python -m pip install PyQt5 pyserial pyinstaller ;;
+            *) python -m pip install -r serial_tool_project/requirements.txt pyinstaller ;;
+          esac
 
       - name: Build exe with PyInstaller
         shell: bash
         working-directory: serial_tool_project
         run: |
-          pyinstaller --clean main.spec
+          python -m PyInstaller --clean main.spec
 
       - name: Add version to release file names
         shell: bash
@@ -84,21 +133,52 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
         run: |
-          test -f "dist/GHowe_串口调试助手_v${RELEASE_VERSION}.exe"
-          test -f "dist/GHowe_串口调试助手_GUI_v${RELEASE_VERSION}.exe"
-          test -f "dist/GHowe_串口调试助手_CLI_v${RELEASE_VERSION}.exe"
+          test -s "dist/GHowe_串口调试助手_v${RELEASE_VERSION}.exe"
+          test -s "dist/GHowe_串口调试助手_GUI_v${RELEASE_VERSION}.exe"
+          test -s "dist/GHowe_串口调试助手_CLI_v${RELEASE_VERSION}.exe"
 
       - name: Prepare release notes from tagged commit
         shell: bash
         working-directory: serial_tool_project
-        run: git log -1 --pretty=%B "${GITHUB_SHA}^{commit}" > ../release-notes.md
+        run: git log -1 --pretty=%B HEAD > ../release-notes.md
+
+      - name: Smoke test packaged CLI entry points
+        shell: pwsh
+        working-directory: serial_tool_project
+        env:
+          RELEASE_VERSION: ${{ steps.validate.outputs.tag_version }}
+        run: |
+          & ".\dist\GHowe_串口调试助手_CLI_v$env:RELEASE_VERSION.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "CLI --help failed: $LASTEXITCODE" }
+          & ".\dist\GHowe_串口调试助手_v$env:RELEASE_VERSION.exe" --cli --help
+          if ($LASTEXITCODE -ne 0) { throw "Universal --cli --help failed: $LASTEXITCODE" }
+
+      - name: Refuse to overwrite an existing release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.repos.getReleaseByTag({
+                ...context.repo,
+                tag: process.env.RELEASE_TAG,
+              });
+            } catch (error) {
+              if (error.status === 404) return;
+              throw error;
+            }
+            throw new Error(`Release ${process.env.RELEASE_TAG} already exists; refusing to overwrite it`);
 
       - name: Create GitHub Release and upload exe files
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+          name: ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ steps.validate.outputs.source_sha }}
           body_path: release-notes.md
+          fail_on_unmatched_files: true
+          make_latest: legacy
+          draft: false
+          prerelease: false
           files: |
             serial_tool_project/dist/GHowe_串口调试助手_v${{ steps.validate.outputs.tag_version }}.exe
             serial_tool_project/dist/GHowe_串口调试助手_GUI_v${{ steps.validate.outputs.tag_version }}.exe
